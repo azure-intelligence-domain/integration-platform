@@ -135,7 +135,7 @@ resource apiProducts 'Microsoft.ApiManagement/service/products@2024-05-01' = [
       displayName: p.displayName
       description: p.description
       subscriptionRequired: p.subscriptionRequired
-      approvalRequired: false
+      approvalRequired: p.subscriptionRequired ? false : null
       state: 'published'
     }
   }
