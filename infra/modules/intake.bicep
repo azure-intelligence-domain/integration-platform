@@ -3,6 +3,7 @@
 // topic, filtered on its event types, pushing each event (CloudEvents, as the topic's managed
 // identity) to the gateway's [Platform] Event Intake API, which forwards it to the backend. Failed
 // deliveries are retried, then dead-lettered into the tap storage. Nothing polls: idle costs nothing.
+// Webhook delivery with a managed identity needs a preview API version of Event Grid.
 
 param apimName string
 
@@ -65,9 +66,9 @@ resource intakePolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-01'
   }
 }
 
-resource topics 'Microsoft.EventGrid/topics@2025-02-15' existing = [for s in subscriptions: { name: s.topic }]
+resource topics 'Microsoft.EventGrid/topics@2025-07-15-preview' existing = [for s in subscriptions: { name: s.topic }]
 
-resource deliveries 'Microsoft.EventGrid/topics/eventSubscriptions@2025-02-15' = [
+resource deliveries 'Microsoft.EventGrid/topics/eventSubscriptions@2025-07-15-preview' = [
   for (s, i) in subscriptions: {
     parent: topics[i]
     name: s.consumer
