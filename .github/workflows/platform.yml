@@ -36,7 +36,9 @@ jobs:
           echo "✅ infra/main.bicep"
       - name: Policies are well-formed XML
         run: |
-          for policy in infra/policies/*.xml; do xmllint --noout "$policy" && echo "✅ $policy"; done
+          for policy in infra/policies/*.xml; do
+            python3 -c 'import sys, xml.dom.minidom as m; m.parse(sys.argv[1])' "$policy" && echo "✅ $policy"
+          done
 
   deploy:
     name: Deploy and smoke test
