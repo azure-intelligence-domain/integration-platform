@@ -1,0 +1,36 @@
+<!--
+  [Platform] Health API: answered by API Management itself, no backend.
+  The global policy has already checked the Correlation-Id header.
+-->
+<policies>
+  <inbound>
+    <base />
+    <return-response>
+      <set-status code="200" reason="OK" />
+      <set-header name="Content-Type" exists-action="override">
+        <value>application/hal+json</value>
+      </set-header>
+      <set-header name="Correlation-Id" exists-action="override">
+        <value>@(context.Request.Headers.GetValueOrDefault("Correlation-Id", ""))</value>
+      </set-header>
+      <set-body>@{
+        return new JObject(
+          new JProperty("_links", new JObject(
+            new JProperty("self", new JObject(new JProperty("href", "/platform/health"))))),
+          new JProperty("status", "available"),
+          new JProperty("correlationId", context.Request.Headers.GetValueOrDefault("Correlation-Id", "")),
+          new JProperty("checkedAt", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"))
+        ).ToString();
+      }</set-body>
+    </return-response>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

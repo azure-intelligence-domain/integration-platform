@@ -1,0 +1,147 @@
+openapi: 3.0.3
+info:
+  title: '[Platform] Health API'
+  version: 1.0.0
+  description: >-
+    Health of the integration platform's gateway. Answered by API Management itself, without a
+    backend, so it proves that the gateway, its policies and its tracing work. Like every API on
+    the platform, it requires the Correlation-Id header: the gateway rejects calls without it.
+  contact:
+    name: Integration Platform Team
+    url: https://github.com/azure-intelligence-domain/integration-platform
+  license:
+    name: MIT
+    url: https://github.com/azure-intelligence-domain/integration-platform/blob/main/LICENSE
+  x-gateway: other
+x-gateway: other
+externalDocs:
+  description: EventCatalog entry of the integration platform
+  url: https://stcatalogxyxd4f2znqkqy.z50.web.core.windows.net/docs/domains/platform/1.0.0
+servers:
+  - url: https://apim-intplat-demo.azure-api.net/platform
+    description: Azure API Management (Consumption), demo environment. No version in the URI.
+security:
+  - subscriptionKey: []
+tags:
+  - name: Health
+    description: Health of the integration platform.
+paths:
+  /health:
+    x-summary: Platform Health
+    get:
+      tags:
+        - Health
+      operationId: retrievePlatformHealth
+      summary: Retrieve Platform Health
+      description: >-
+        Returns the gateway's health and echoes the correlation id, so a caller can follow the
+        call in the platform's tracing.
+      parameters:
+        - $ref: '#/components/parameters/correlationId'
+      responses:
+        '200':
+          description: The gateway is available.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/health'
+              example:
+                _links:
+                  self:
+                    href: /platform/health
+                status: available
+                correlationId: ord-4711
+                checkedAt: '2026-10-16T17:30:00Z'
+        '400':
+          description: The Correlation-Id header is missing or invalid. The gateway enforces this for every API.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/problemDetail'
+              example:
+                type: https://github.com/azure-intelligence-domain/integration-platform/blob/main/docs/problems/correlation-id-required.md
+                title: Correlation Id Required
+                status: 400
+                detail: Every call must carry a Correlation-Id header, for example ord-4711.
+                instance: /platform/health
+components:
+  securitySchemes:
+    subscriptionKey:
+      type: apiKey
+      in: header
+      name: Ocp-Apim-Subscription-Key
+      description: API Management subscription key of the consuming application.
+  parameters:
+    correlationId:
+      name: Correlation-Id
+      in: header
+      required: true
+      description: >-
+        The business journey this call belongs to, for example ord-4711. The same value as the
+        correlationid attribute of the events in that journey.
+      schema:
+        type: string
+        pattern: '^[a-z0-9]+(-[a-z0-9]+)*$'
+        maxLength: 64
+      example: ord-4711
+  schemas:
+    health:
+      type: object
+      description: The gateway's health.
+      required:
+        - _links
+        - status
+        - correlationId
+        - checkedAt
+      properties:
+        _links:
+          type: object
+          description: HAL links of the resource.
+          required:
+            - self
+          properties:
+            self:
+              type: object
+              description: Link to this resource.
+              required:
+                - href
+              properties:
+                href:
+                  type: string
+                  description: URI of the resource.
+        status:
+          type: string
+          description: Whether the gateway is available.
+          enum:
+            - available
+        correlationId:
+          type: string
+          description: The Correlation-Id of the call, echoed back.
+        checkedAt:
+          type: string
+          format: date-time
+          description: When the gateway answered. ISO 8601, UTC.
+    problemDetail:
+      type: object
+      description: Problem Details for HTTP APIs (RFC 9457).
+      required:
+        - type
+        - title
+        - status
+      properties:
+        type:
+          type: string
+          format: uri
+          description: URI identifying the problem type.
+        title:
+          type: string
+          description: Short, human-readable summary of the problem type.
+        status:
+          type: integer
+          description: The HTTP status code.
+        detail:
+          type: string
+          description: Explanation specific to this occurrence.
+        instance:
+          type: string
+          description: URI of the request that caused the problem.

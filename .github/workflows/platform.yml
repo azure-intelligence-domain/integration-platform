@@ -1,0 +1,124 @@
+name: platform
+
+# Contract check (no contract, no deploy), then deploy the shared foundation and prove it works:
+# the gateway answers, enforces Correlation-Id for every API, and traces every call.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  contracts:
+    uses: azure-intelligence-domain/contracts/.github/workflows/contract-check.yml@v1.1.0
+    with:
+      contracts: openapi.yaml
+      contracts-ref: v1.1.0
+
+  validate:
+    name: Compile Bicep and validate policies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bicep (any warning fails the build)
+        run: |
+          az bicep install --only-show-errors
+          diagnostics=$("$HOME/.azure/bin/bicep" build infra/main.bicep --stdout 2>&1 >/dev/null || true)
+          if echo "$diagnostics" | grep -qE ': (Warning|Error) '; then echo "$diagnostics"; exit 1; fi
+          echo "✅ infra/main.bicep"
+      - name: Policies are well-formed XML
+        run: |
+          for policy in infra/policies/*.xml; do xmllint --noout "$policy" && echo "✅ $policy"; done
+
+  deploy:
+    name: Deploy and smoke test
+    needs: [contracts, validate]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: azure
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RESOURCE_GROUP: rg-intplat-platform
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: What-if
+        env:
+          PUBLISHER_EMAIL: ${{ secrets.APIM_PUBLISHER_EMAIL }}
+        run: |
+          az deployment group what-if -g "$RESOURCE_GROUP" -n platform -f infra/main.bicep \
+            -p publisherEmail="$PUBLISHER_EMAIL"
+
+      - name: Deploy
+        env:
+          PUBLISHER_EMAIL: ${{ secrets.APIM_PUBLISHER_EMAIL }}
+        run: |
+          outputs=$(az deployment group create -g "$RESOURCE_GROUP" -n platform -f infra/main.bicep \
+            -p publisherEmail="$PUBLISHER_EMAIL" --query properties.outputs -o json)
+          echo "GATEWAY=$(echo "$outputs" | jq -r .gatewayUrl.value)" >> "$GITHUB_ENV"
+          echo "APIM=$(echo "$outputs" | jq -r .apiManagementName.value)" >> "$GITHUB_ENV"
+          echo "WORKSPACE=$(echo "$outputs" | jq -r .workspaceCustomerId.value)" >> "$GITHUB_ENV"
+          echo "$outputs" | jq -r '.topicEndpoints.value[] | "topic \(.domain): \(.endpoint)"'
+
+      - name: Fetch the smoke-test subscription key (never stored)
+        run: |
+          key=$(az rest --method post --url "https://management.azure.com/subscriptions/$(az account show --query id -o tsv)/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.ApiManagement/service/$APIM/subscriptions/smoke-test/listSecrets?api-version=2024-05-01" --query primaryKey -o tsv)
+          echo "::add-mask::$key"
+          echo "APIM_KEY=$key" >> "$GITHUB_ENV"
+          echo "CORRELATION_ID=smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+
+      - name: Smoke test — the gateway answers and echoes the journey
+        run: |
+          url="$GATEWAY/platform/health"
+          for attempt in $(seq 1 18); do  # a new Consumption gateway can take a few minutes
+            status=$(curl -s -o body.json -D headers.txt -w '%{http_code}' "$url" \
+              -H "Ocp-Apim-Subscription-Key: $APIM_KEY" -H "Correlation-Id: $CORRELATION_ID")
+            [ "$status" = 200 ] && break
+            echo "attempt $attempt: HTTP $status"; sleep 10
+          done
+          cat body.json; echo
+          test "$status" = 200
+          grep -qi '^content-type: application/hal+json' headers.txt
+          grep -qi "^correlation-id: $CORRELATION_ID" headers.txt
+          test "$(jq -r .correlationId body.json)" = "$CORRELATION_ID"
+          test "$(jq -r .status body.json)" = available
+          echo "✅ 200, HAL, Correlation-Id echoed"
+
+      - name: Smoke test — every call needs a valid Correlation-Id
+        run: |
+          for header in "" "Correlation-Id: ORD 4711"; do
+            status=$(curl -s -o problem.json -D headers.txt -w '%{http_code}' "$GATEWAY/platform/health" \
+              -H "Ocp-Apim-Subscription-Key: $APIM_KEY" ${header:+-H "$header"})
+            cat problem.json; echo
+            test "$status" = 400
+            grep -qi '^content-type: application/problem+json' headers.txt
+            test "$(jq -r .title problem.json)" = "Correlation Id Required"
+          done
+          echo "✅ missing and invalid Correlation-Id rejected with Problem Details"
+
+      - name: Smoke test — the call is traced in Application Insights
+        run: |
+          query="AppRequests | where TimeGenerated > ago(1h) | where tostring(Properties) has '$CORRELATION_ID' | count"
+          for attempt in $(seq 1 30); do  # ingestion takes a few minutes
+            count=$(az monitor log-analytics query -w "$WORKSPACE" --analytics-query "$query" --query "[0].Count" -o tsv 2>/dev/null || echo 0)
+            if [ "${count:-0}" -gt 0 ]; then echo "✅ traced: $count request(s) with $CORRELATION_ID"; exit 0; fi
+            echo "attempt $attempt: not ingested yet"; sleep 20
+          done
+          echo "::error::The smoke-test call never appeared in Application Insights"; exit 1

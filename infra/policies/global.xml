@@ -1,0 +1,42 @@
+<!--
+  Global policy: applies to every API on the gateway, now and in the future.
+  The one rule for synchronous calls: every call joins a business journey through the
+  Correlation-Id header (same format as the correlationid attribute of the event envelope).
+-->
+<policies>
+  <inbound>
+    <choose>
+      <!-- Single-quoted attribute, so the C# expression can use double quotes and stay valid XML. -->
+      <when condition='@{
+          var id = context.Request.Headers.GetValueOrDefault("Correlation-Id", "");
+          return id.Length == 0 || id.Length > 64
+              || !System.Text.RegularExpressions.Regex.IsMatch(id, "^[a-z0-9]+(-[a-z0-9]+)*$");
+        }'>
+        <return-response>
+          <set-status code="400" reason="Bad Request" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/problem+json</value>
+          </set-header>
+          <set-body>@{
+            return new JObject(
+              new JProperty("type", "https://github.com/azure-intelligence-domain/integration-platform/blob/main/docs/problems/correlation-id-required.md"),
+              new JProperty("title", "Correlation Id Required"),
+              new JProperty("status", 400),
+              new JProperty("detail", "Every call must carry a Correlation-Id header, for example ord-4711."),
+              new JProperty("instance", context.Request.OriginalUrl.Path)
+            ).ToString();
+          }</set-body>
+        </return-response>
+      </when>
+    </choose>
+  </inbound>
+  <backend>
+    <forward-request />
+  </backend>
+  <outbound>
+    <set-header name="Correlation-Id" exists-action="override">
+      <value>@(context.Request.Headers.GetValueOrDefault("Correlation-Id", ""))</value>
+    </set-header>
+  </outbound>
+  <on-error />
+</policies>
