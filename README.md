@@ -70,6 +70,40 @@ The platform creates a `tap` subscription on every topic and the gateways emit t
 global policies: no producer can forget it or opt out. Every pipeline publishes a deployment event
 with [`.github/actions/deployment-event`](.github/actions/deployment-event/action.yml).
 
+## Data model
+
+The platform has no business data of its own: it carries events. Their business keys point into
+the domains' models, which is what lets the Intelligence domain join every domain's facts into one
+story. Defined once in [`ai-intelligence-domain/docs/architecture/data_models.py`](https://github.com/azure-intelligence-domain/ai-intelligence-domain/blob/main/docs/architecture/data_models.py), which also writes the entities of EventCatalog.
+
+```mermaid
+erDiagram
+    CloudEvent {
+        string id PK
+        string source
+        string type
+        datetime time
+        string correlationid
+        string customerid FK
+        string orderid FK
+        string partnerid FK
+        string componentid
+        object data
+    }
+    Account {
+        string see_sales_domain
+    }
+    Order {
+        string see_order_domain
+    }
+    Partner {
+        string see_logistics_domain
+    }
+    CloudEvent }o--o| Account : "customerid"
+    CloudEvent }o--o| Order : "orderid"
+    CloudEvent }o--o| Partner : "partnerid"
+```
+
 ## Routing is configuration
 
 The platform team owns the gateways and the topics; building blocks ask for routing with a pull

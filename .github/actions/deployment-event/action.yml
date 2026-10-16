@@ -2,13 +2,13 @@ name: Deployment event
 description: >-
   Publish a deployment as a CloudEvent (com.acme.platform.deployment.completed) to the platform
   topic, so the tap and the Intelligence domain know what changed when ("deploy v2.4 of
-  stock-to-3pl"). Every building block calls this at the end of its deploy job (ADR 0011).
+  logistics-intake"). Every building block calls this at the end of its deploy job (ADR 0011).
 inputs:
   token:
     description: Entra ID access token for https://eventgrid.azure.net (acquired right after the OIDC login).
     required: true
   component:
-    description: The building block or flow that was deployed, e.g. stock-to-3pl.
+    description: The building block or flow that was deployed, e.g. logistics-intake.
     required: true
   version:
     description: The version that was deployed.
