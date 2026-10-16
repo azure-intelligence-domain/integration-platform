@@ -1,0 +1,124 @@
+name: journey
+
+# End to end, through the platform as a person would: ACME places an order, looks it up, cancels it,
+# and tries to put the cancelled order on hold. Proves the slice: gateway → Order Process API →
+# Salesforce System API (internal, Entra token) → Cosmos DB, business events on evgt-intplat-order,
+# and every hop in the tap. Run by hand, or after a building block of the order slice deployed.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  journey:
+    name: ACME's order journey
+    runs-on: ubuntu-latest
+    environment: azure
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GATEWAY: https://apim-intplat-demo.azure-api.net
+      TAP_QUEUE_URL: https://sttapintplatdemo.queue.core.windows.net/tap-events
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Keys and tokens (never stored)
+        run: |
+          sub=$(az account show --query id -o tsv)
+          key=$(az rest --method post --url "https://management.azure.com/subscriptions/$sub/resourceGroups/rg-intplat-platform/providers/Microsoft.ApiManagement/service/apim-intplat-demo/subscriptions/smoke-test/listSecrets?api-version=2024-05-01" --query primaryKey -o tsv)
+          echo "::add-mask::$key"; echo "APIM_KEY=$key" >> "$GITHUB_ENV"
+          token=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
+          echo "::add-mask::$token"; echo "STORAGE_TOKEN=$token" >> "$GITHUB_ENV"
+          echo "IDEMPOTENCY_KEY=journey-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+
+      - name: Tap baseline
+        run: |
+          count=$(curl -s -I "$TAP_QUEUE_URL?comp=metadata" -H "Authorization: Bearer $STORAGE_TOKEN" -H "x-ms-version: 2021-08-06" \
+            | tr -d '\r' | awk -F': ' 'tolower($1)=="x-ms-approximate-messages-count"{print $2}')
+          test -n "$count"; echo "TAP_BASELINE=$count" >> "$GITHUB_ENV"; echo "tap holds $count message(s)"
+
+      - name: 1. ACME places an order
+        run: |
+          call() { curl -s -o order.json -D headers.txt -w '%{http_code}' -X POST "$GATEWAY/order/orders" \
+            -H "Ocp-Apim-Subscription-Key: $APIM_KEY" -H "Correlation-Id: journey-$GITHUB_RUN_ID" \
+            -H "Idempotency-Key: $IDEMPOTENCY_KEY" -H "Content-Type: application/json" \
+            -d '{"customerId":"ACME","channel":"salesforce","orderLines":[{"productId":"SKU-1042","quantity":12,"unitPrice":{"value":7000.0,"currency":"EUR"}}],"deliveryAddress":{"street":"Rue de la Loi 16","postalCode":"1000","city":"Brussels","countryCode":"BE"},"requestedDeliveryDate":"2026-10-09"}'; }
+          for attempt in $(seq 1 12); do  # a cold Function can take a moment
+            status=$(call); [ "$status" = 201 ] && break
+            echo "attempt $attempt: HTTP $status $(cat order.json)"; sleep 10
+          done
+          cat order.json | jq .; test "$status" = 201
+          test "$(jq -r .status order.json)" = placed
+          test "$(jq -r .totalAmount.value order.json)" = 84000
+          order=$(jq -r .orderId order.json); echo "ORDER=$order" >> "$GITHUB_ENV"
+          echo "CORRELATION_ID=ord-$order" >> "$GITHUB_ENV"
+          echo "✅ order $order placed: 201, 84000 EUR, status placed"
+
+          status=$(call); test "$status" = 201; test "$(jq -r .orderId order.json)" = "$order"
+          echo "✅ a retry with the same Idempotency-Key returns order $order again"
+
+      - name: 2. Customer service looks it up (a query, tapped with orderid)
+        run: |
+          status=$(curl -s -o order.json -w '%{http_code}' "$GATEWAY/order/orders/$ORDER" \
+            -H "Ocp-Apim-Subscription-Key: $APIM_KEY" -H "Correlation-Id: $CORRELATION_ID")
+          test "$status" = 200; test "$(jq -r .orderId order.json)" = "$ORDER"
+          status=$(curl -s -o list.json -w '%{http_code}' "$GATEWAY/order/orders?customerId=ACME&status=placed&limit=5" \
+            -H "Ocp-Apim-Subscription-Key: $APIM_KEY" -H "Correlation-Id: $CORRELATION_ID")
+          test "$status" = 200; jq '{totalCount, _links}' list.json
+          echo "✅ retrieved order $ORDER and ACME's placed orders"
+
+      - name: 3. ACME cancels it (soft delete → OrderCancelled)
+        run: |
+          status=$(curl -s -o order.json -w '%{http_code}' -X DELETE "$GATEWAY/order/orders/$ORDER?reason=Customer%20withdrew%20the%20order." \
+            -H "Ocp-Apim-Subscription-Key: $APIM_KEY" -H "Correlation-Id: $CORRELATION_ID")
+          cat order.json | jq '{orderId, status, cancellationReason}'
+          test "$status" = 200; test "$(jq -r .status order.json)" = cancelled
+          status=$(curl -s -o order.json -w '%{http_code}' "$GATEWAY/order/orders/$ORDER" \
+            -H "Ocp-Apim-Subscription-Key: $APIM_KEY" -H "Correlation-Id: $CORRELATION_ID")
+          test "$status" = 200; test "$(jq -r .status order.json)" = cancelled
+          echo "✅ order $ORDER cancelled, and still there"
+
+      - name: 4. A cancelled order cannot be put on hold (409)
+        run: |
+          status=$(curl -s -o problem.json -D headers.txt -w '%{http_code}' -X PUT "$GATEWAY/order/orders/$ORDER/hold" \
+            -H "Ocp-Apim-Subscription-Key: $APIM_KEY" -H "Correlation-Id: $CORRELATION_ID" \
+            -H "Content-Type: application/json" -d '{"reason":"Credit check."}')
+          cat problem.json | jq .
+          test "$status" = 409; grep -qi '^content-type: application/problem+json' headers.txt
+          test "$(jq -r .title problem.json)" = "Order State Conflict"
+          echo "✅ 409 Order State Conflict"
+
+      - name: 5. Nobody goes around the platform
+        run: |
+          status=$(curl -s -o problem.json -w '%{http_code}' "$GATEWAY/salesforce/orders/$ORDER" -H "Correlation-Id: $CORRELATION_ID")
+          test "$status" = 401; test "$(jq -r .title problem.json)" = "Platform Token Required"
+          echo "✅ System API without a platform token: 401"
+          for host in func-intplat-process-api-order func-intplat-system-api-salesforce; do
+            status=$(curl -s -o /dev/null -w '%{http_code}' "https://$host.azurewebsites.net/orders/$ORDER" -H "Correlation-Id: $CORRELATION_ID")
+            test "$status" = 401; echo "✅ $host directly: 401"
+          done
+
+      - name: 6. Every hop is in the tap
+        run: |
+          # Every call through the gateway, internal ones included, plus the business events:
+          #   place        mutation, internal idempotency query, internal create, OrderPlaced   4
+          #   place again  mutation, internal idempotency query                               2
+          #   3 lookups    query + internal read, each                                         6
+          #   cancel       mutation, internal read, internal replace, OrderCancelled           4
+          #   hold (409)   mutation, internal read                                             2
+          #   no token     query (refused after it was tapped)                                 1
+          expected=$((TAP_BASELINE + 19))
+          for attempt in $(seq 1 30); do
+            now=$(curl -s -I "$TAP_QUEUE_URL?comp=metadata" -H "Authorization: Bearer $STORAGE_TOKEN" -H "x-ms-version: 2021-08-06" \
+              | tr -d '\r' | awk -F': ' 'tolower($1)=="x-ms-approximate-messages-count"{print $2}')
+            if [ "${now:-0}" -ge "$expected" ]; then echo "✅ tap: $((now - TAP_BASELINE)) new message(s) for this journey"; exit 0; fi
+            echo "attempt $attempt: $((${now:-0} - TAP_BASELINE)) new, waiting for 19"; sleep 10
+          done
+          echo "::error::Not every hop reached the tap"; exit 1

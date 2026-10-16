@@ -10,9 +10,17 @@
 apis:
   - name: process-api-order
     repository: process-api-order
-    release: v0.1.0
+    release: v1.0.0
     path: order
     backend: func-intplat-process-api-order
     gateways:
       people: processes
       agents: agents
+
+  - name: system-api-salesforce
+    repository: system-api-salesforce
+    release: v1.0.0
+    path: salesforce
+    backend: func-intplat-system-api-salesforce
+    gateways:
+      people: system-apis
