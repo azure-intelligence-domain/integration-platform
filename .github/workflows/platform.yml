@@ -20,8 +20,8 @@ jobs:
   contracts:
     uses: azure-intelligence-domain/contracts/.github/workflows/contract-check.yml@v1.1.0
     with:
-      contracts: openapi.yaml
-      contracts-ref: v1.1.0
+      contracts: openapi.yaml intake.openapi.yaml
+      contracts-ref: v1.2.0
 
   validate:
     name: Compile Bicep and validate policies
@@ -76,13 +76,34 @@ jobs:
           echo "BLOCK_PRINCIPALS=$(az identity list -g rg-intplat-identities --query '[].principalId' -o json | jq -c .)" >> "$GITHUB_ENV"
           echo "CORRELATION_ID=smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
 
+      # The intake routes only to backends that exist (after a kill-switch rebuild, consumers are
+      # deployed after the platform; rerun the platform pipeline once they are).
+      - name: Resolve intake backends (routing/consumers.yaml)
+        run: |
+          backends='{}'
+          while read -r c; do
+            name=$(jq -r .name <<< "$c"); rg=$(jq -r .backend.resourceGroup <<< "$c")
+            la=$(jq -r '.backend.logicApp // empty' <<< "$c"); fn=$(jq -r '.backend.function // empty' <<< "$c")
+            if [ -n "$la" ]; then
+              base=$(az resource show -g "$rg" -n "$la" --resource-type Microsoft.Logic/workflows --query properties.accessEndpoint -o tsv 2>/dev/null || true)
+              path="/triggers/event/paths/invoke?api-version=2016-10-01"
+            else
+              host=$(az functionapp show -g "$rg" -n "$fn" --query defaultHostName -o tsv 2>/dev/null || true)
+              base=${host:+https://$host}; path="/intake"
+            fi
+            if [ -z "$base" ]; then echo "::notice::$name is not deployed yet: no events routed to it"; continue; fi
+            backends=$(jq -c --arg n "$name" --arg b "$base" --arg p "$path" '. + {($n): {baseUrl: $b, path: $p}}' <<< "$backends")
+            echo "intake → $name: $base$path"
+          done < <(yq -o=json '.consumers' routing/consumers.yaml | jq -c '.[]')
+          echo "INTAKE_BACKENDS=$backends" >> "$GITHUB_ENV"
+
       - name: What-if
         env:
           PUBLISHER_EMAIL: ${{ secrets.APIM_PUBLISHER_EMAIL }}
         run: |
           az deployment group what-if -g "$RESOURCE_GROUP" -n platform -f infra/main.bicep \
             -p publisherEmail="$PUBLISHER_EMAIL" pipelinePrincipalId="$PIPELINE_PRINCIPAL" \
-               buildingBlockPrincipalIds="$BLOCK_PRINCIPALS"
+               buildingBlockPrincipalIds="$BLOCK_PRINCIPALS" intakeBackends="$INTAKE_BACKENDS"
 
       - name: Deploy
         env:
@@ -90,12 +111,13 @@ jobs:
         run: |
           outputs=$(az deployment group create -g "$RESOURCE_GROUP" -n platform -f infra/main.bicep \
             -p publisherEmail="$PUBLISHER_EMAIL" pipelinePrincipalId="$PIPELINE_PRINCIPAL" \
-               buildingBlockPrincipalIds="$BLOCK_PRINCIPALS" --query properties.outputs -o json)
+               buildingBlockPrincipalIds="$BLOCK_PRINCIPALS" intakeBackends="$INTAKE_BACKENDS" --query properties.outputs -o json)
           echo "GATEWAY=$(echo "$outputs" | jq -r .peopleGatewayUrl.value)" >> "$GITHUB_ENV"
           echo "AGENT_GATEWAY=$(echo "$outputs" | jq -r .agentGatewayUrl.value)" >> "$GITHUB_ENV"
           echo "WORKSPACE=$(echo "$outputs" | jq -r .workspaceCustomerId.value)" >> "$GITHUB_ENV"
           echo "TOPICS=$(echo "$outputs" | jq -c '[.topics.value[].endpoint]')" >> "$GITHUB_ENV"
           echo "$outputs" | jq -r '.topics.value[] | "topic \(.name): \(.endpoint)"'
+          echo "$outputs" | jq -r '.intakeSubscriptions.value[] | "intake subscription \(.)"'
 
       - name: Fetch the smoke-test subscription keys (never stored)
         run: |

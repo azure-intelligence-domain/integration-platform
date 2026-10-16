@@ -1,0 +1,104 @@
+<!--
+  [Platform] Event Intake API (intake.openapi.yaml, ADR 0016): Event Grid pushes every routed event
+  here; the gateway hands it to the consumer's backend.
+  1. The CloudEvents webhook handshake (OPTIONS) is answered here: a Logic App trigger takes POST only.
+  2. Only Event Grid gets in: an Entra ID token of a platform topic's managed identity (oid), for
+     the intplat-platform-apis application. The topic identities are filled in at deploy time.
+  3. The journey: Event Grid sends no Correlation-Id header; the event's correlationid is it.
+  4. <base /> runs the global policy: the Correlation-Id rule and the tap (every delivery is a hop).
+  5. The backend comes from routing/consumers.yaml (named value intake-backends, base64 JSON), and is
+     called with the gateway's managed identity, as every backend.
+  Format "xml": C# generics are written as &lt;JObject&gt;; attributes holding C# strings use single quotes.
+-->
+<policies>
+  <inbound>
+    <choose>
+      <when condition='@(context.Request.Method == "OPTIONS")'>
+        <return-response>
+          <set-status code="200" reason="OK" />
+          <set-header name="WebHook-Allowed-Origin" exists-action="override">
+            <value>@(context.Request.Headers.GetValueOrDefault("WebHook-Request-Origin", "eventgrid.azure.net"))</value>
+          </set-header>
+          <set-header name="WebHook-Allowed-Rate" exists-action="override">
+            <value>*</value>
+          </set-header>
+        </return-response>
+      </when>
+    </choose>
+    <validate-azure-ad-token tenant-id="{{tenant-id}}" header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Only Event Grid, with the managed identity of a platform topic, delivers events.">
+      <audiences>
+        <audience>api://{{platform-apis-app-id}}</audience>
+      </audiences>
+      <required-claims>
+        <claim name="oid" match="any">
+          <!-- topic identities -->
+        </claim>
+      </required-claims>
+    </validate-azure-ad-token>
+    <set-variable name="backend" value='@{
+      var routes = JObject.Parse(System.Text.Encoding.UTF8.GetString(Convert.FromBase64String("{{intake-backends}}")));
+      var route = routes[context.Request.MatchedParameters["consumer"]];
+      return route == null ? "" : route.ToString(Newtonsoft.Json.Formatting.None);
+    }' />
+    <choose>
+      <when condition='@((string)context.Variables["backend"] == "")'>
+        <return-response>
+          <set-status code="404" reason="Not Found" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/problem+json</value>
+          </set-header>
+          <set-body>@{
+            return new JObject(
+              new JProperty("type", "https://github.com/azure-intelligence-domain/integration-platform/blob/main/docs/problems/unknown-consumer.md"),
+              new JProperty("title", "Unknown Consumer"),
+              new JProperty("status", 404),
+              new JProperty("detail", "No consumer of this name is routed (routing/consumers.yaml)."),
+              new JProperty("instance", context.Request.OriginalUrl.Path)
+            ).ToString();
+          }</set-body>
+        </return-response>
+      </when>
+    </choose>
+    <set-header name="Correlation-Id" exists-action="skip">
+      <value>@{
+        var body = context.Request.Body?.As&lt;JObject&gt;(preserveContent: true);
+        return body?["correlationid"]?.ToString() ?? "";
+      }</value>
+    </set-header>
+    <base />
+    <set-backend-service base-url='@(JObject.Parse((string)context.Variables["backend"])["baseUrl"].ToString())' />
+    <rewrite-uri template='@(JObject.Parse((string)context.Variables["backend"])["path"].ToString())' copy-unmatched-params="false" />
+    <set-header name="Content-Type" exists-action="override">
+      <value>application/json</value>
+    </set-header>
+    <authentication-managed-identity resource="api://{{platform-apis-app-id}}" />
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+    <choose>
+      <when condition='@(context.LastError.Source == "validate-azure-ad-token")'>
+        <return-response>
+          <set-status code="401" reason="Unauthorized" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/problem+json</value>
+          </set-header>
+          <set-body>@{
+            return new JObject(
+              new JProperty("type", "https://github.com/azure-intelligence-domain/integration-platform/blob/main/docs/problems/event-grid-token-required.md"),
+              new JProperty("title", "Event Grid Token Required"),
+              new JProperty("status", 401),
+              new JProperty("detail", "Only Event Grid, with the managed identity of a platform topic, delivers events."),
+              new JProperty("instance", context.Request.OriginalUrl.Path)
+            ).ToString();
+          }</set-body>
+        </return-response>
+      </when>
+    </choose>
+  </on-error>
+</policies>

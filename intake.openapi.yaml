@@ -1,0 +1,241 @@
+openapi: 3.0.3
+info:
+  title: '[Platform] Event Intake API'
+  version: 1.0.0
+  description: 'How the platform delivers events to the building blocks that receive them (ADR 0016). Event Grid
+    pushes every event a consumer subscribes to (routing/consumers.yaml) to this API; the gateway checks Event Grid''s
+    Entra ID token, taps the hop, and forwards the event to the consumer''s backend with its own managed identity.
+    Not called by people or building blocks: by Event Grid only. The consumer answers 2xx when the event is handled
+    (or deliberately ignored) and 5xx when it should be retried; after the retries Event Grid dead-letters the event
+    into the tap.'
+  contact:
+    name: Integration Platform Team
+    url: https://github.com/azure-intelligence-domain/integration-platform
+  license:
+    name: MIT
+    url: https://github.com/azure-intelligence-domain/integration-platform/blob/main/LICENSE
+  x-gateway: other
+x-gateway: other
+externalDocs:
+  description: EventCatalog entry of the integration platform
+  url: https://azure-intelligence-domain.github.io/eventcatalog/docs/domains/platform/1.0.0
+servers:
+- url: https://apim-intplat-demo.azure-api.net/intake
+  description: Gateway for people and websites; this API takes calls from Event Grid only.
+security:
+- eventGridToken: []
+tags:
+- name: Intake
+  description: Event delivery to the receiving building blocks.
+paths:
+  /consumers/{consumer}/events:
+    x-summary: Consumer Events
+    post:
+      tags:
+      - Intake
+      operationId: deliverEvent
+      summary: Deliver Event
+      description: One CloudEvent for one consumer. The gateway takes the Correlation-Id from the event's correlationid
+        when the header is absent.
+      parameters:
+      - $ref: '#/components/parameters/consumer'
+      - $ref: '#/components/parameters/correlationId'
+      requestBody:
+        required: true
+        content:
+          application/cloudevents+json:
+            schema:
+              $ref: '#/components/schemas/cloudEvent'
+            example:
+              specversion: '1.0'
+              id: orderPlaced-4711-0001
+              source: /process-api-order/1.1.0
+              type: com.acme.order.placed
+              time: '2026-10-03T09:12:01Z'
+              datacontenttype: application/json
+              correlationid: ord-4711
+              customerid: ACME
+              orderid: '4711'
+              data:
+                orderId: '4711'
+                customerId: ACME
+      responses:
+        '200':
+          description: Handled, or deliberately ignored, by the consumer. The body is the consumer's; Event Grid
+            does not read it.
+        '400':
+          description: The body is not a platform event, or it carries no correlationid.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/problemDetail'
+              example:
+                type: https://github.com/azure-intelligence-domain/integration-platform/blob/main/docs/problems/correlation-id-required.md
+                title: Invalid Request
+                status: 400
+                detail: The body is not a platform event, or it carries no correlationid.
+                instance: /intake/consumers/finance-intake/events
+        '401':
+          description: Only Event Grid, with the managed identity of a platform topic, delivers events.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/problemDetail'
+              example:
+                type: https://github.com/azure-intelligence-domain/integration-platform/blob/main/docs/problems/event-grid-token-required.md
+                title: Event Grid Token Required
+                status: 401
+                detail: Only Event Grid, with the managed identity of a platform topic, delivers events.
+                instance: /intake/consumers/finance-intake/events
+        '404':
+          description: No consumer of this name is routed (routing/consumers.yaml).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/problemDetail'
+              example:
+                type: https://github.com/azure-intelligence-domain/integration-platform/blob/main/docs/problems/unknown-consumer.md
+                title: Unknown Consumer
+                status: 404
+                detail: No consumer of this name is routed (routing/consumers.yaml).
+                instance: /intake/consumers/finance-intake/events
+        '502':
+          description: The consumer could not handle the event; Event Grid retries, then dead-letters.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/problemDetail'
+              example:
+                type: https://github.com/azure-intelligence-domain/integration-platform/blob/main/docs/problems/delivery-failed.md
+                title: Delivery Failed
+                status: 502
+                detail: The consumer could not handle the event; Event Grid retries, then dead-letters.
+                instance: /intake/consumers/finance-intake/events
+    options:
+      tags:
+      - Intake
+      operationId: validateWebhook
+      summary: Validate Webhook
+      description: 'The CloudEvents webhook handshake: Event Grid asks whether it may deliver here; the gateway
+        allows it.'
+      parameters:
+      - $ref: '#/components/parameters/consumer'
+      - $ref: '#/components/parameters/webhookRequestOrigin'
+      responses:
+        '200':
+          description: Event Grid may deliver.
+          headers:
+            WebHook-Allowed-Origin:
+              description: The origin that may deliver.
+              schema:
+                type: string
+              example: eventgrid.azure.net
+components:
+  securitySchemes:
+    eventGridToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Entra ID token of a platform topic's managed identity for the intplat-platform-apis application
+        (Event Grid delivery with resource identity).
+  parameters:
+    consumer:
+      name: consumer
+      in: path
+      required: true
+      description: The receiving building block, as named in routing/consumers.yaml, e.g. finance-intake.
+      schema:
+        type: string
+        pattern: ^[a-z0-9]+(-[a-z0-9]+)*$
+      example: finance-intake
+    correlationId:
+      name: Correlation-Id
+      in: header
+      required: false
+      description: The business journey; when absent, the gateway takes it from the event's correlationid.
+      schema:
+        type: string
+        pattern: ^[a-z0-9]+(-[a-z0-9]+)*$
+        maxLength: 64
+      example: ord-4711
+    webhookRequestOrigin:
+      name: WebHook-Request-Origin
+      in: header
+      required: true
+      description: Who asks to deliver.
+      schema:
+        type: string
+      example: eventgrid.azure.net
+  schemas:
+    problemDetail:
+      type: object
+      description: Problem Details (RFC 9457).
+      required:
+      - title
+      - detail
+      properties:
+        type:
+          type: string
+          format: uri
+          description: Problem type.
+        title:
+          type: string
+          description: Summary.
+        status:
+          type: integer
+          description: HTTP status.
+        detail:
+          type: string
+          description: This occurrence.
+        instance:
+          type: string
+          description: Request URI.
+    cloudEvent:
+      type: object
+      description: 'A platform event: the envelope of the contracts repository (schemas/envelope/1.1.0), CloudEvents
+        1.0 with correlationid and business keys.'
+      required:
+      - specversion
+      - id
+      - source
+      - type
+      - time
+      - correlationid
+      properties:
+        specversion:
+          type: string
+          description: 1.0.
+        id:
+          type: string
+          description: Unique per event.
+        source:
+          type: string
+          description: Who published it.
+        type:
+          type: string
+          description: The fact, e.g. com.acme.order.placed.
+        time:
+          type: string
+          format: date-time
+          description: When it happened, UTC.
+        datacontenttype:
+          type: string
+          description: application/json.
+        correlationid:
+          type: string
+          description: The business journey, e.g. ord-4711.
+        customerid:
+          type: string
+          description: Business key.
+        orderid:
+          type: string
+          description: Business key.
+        partnerid:
+          type: string
+          description: Business key.
+        componentid:
+          type: string
+          description: Business key.
+        data:
+          type: object
+          description: The payload, owned by the producer.

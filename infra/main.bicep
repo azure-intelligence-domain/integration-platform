@@ -22,6 +22,9 @@ param agentGatewayAppId string = '881433d3-4894-411b-8b31-6912a67ef43f'
 @description('Application (client) id of the intplat-platform-apis Entra application, the audience of internal calls (bootstrap/platform-apis-app.sh in azure-landing-zone).')
 param platformApisAppId string = 'e3337087-144a-4b2e-8faa-c802660b9dee'
 
+@description('Backends of the consumers that exist, by name: { baseUrl, path } (resolved by the pipeline from routing/consumers.yaml).')
+param intakeBackends object = {}
+
 @description('Principal id of this pipeline\'s identity: publishes tap probes, reads the tap queue length.')
 param pipelinePrincipalId string
 
@@ -37,6 +40,7 @@ var topicNames = concat(domains, ['platform'])
 var apis = loadYamlContent('../routing/apis.yaml').apis
 var producers = loadYamlContent('../routing/producers.yaml').producers
 var internalCallers = loadYamlContent('../routing/internal-callers.yaml').callers
+var consumers = loadYamlContent('../routing/consumers.yaml').consumers
 
 // Runtime identities are created by the landing zone; the routing names them, Azure resolves them.
 resource producerIdentities 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = [
@@ -192,6 +196,19 @@ module agentApis 'modules/apis.bicep' = {
   }
 }
 
+module intake 'modules/intake.bicep' = {
+  name: 'intake'
+  params: {
+    apimName: peopleGateway.outputs.name
+    consumers: consumers
+    backends: intakeBackends
+    topicPrincipalIds: toObject(messaging.outputs.topics, t => t.name, t => t.principalId)
+    tapStorageId: tap.outputs.storageId
+    deadLetterContainer: tap.outputs.consumerDeadLetterContainer
+    platformApisAppId: platformApisAppId
+  }
+}
+
 output peopleGatewayUrl string = peopleGateway.outputs.gatewayUrl
 output agentGatewayUrl string = agentGateway.outputs.gatewayUrl
 output workspaceCustomerId string = monitoring.outputs.workspaceCustomerId
@@ -199,4 +216,5 @@ output topics array = messaging.outputs.topics
 output serviceBusName string = messaging.outputs.serviceBusName
 output agentGatewayAudience string = 'api://${agentGatewayAppId}'
 output platformApisAudience string = 'api://${platformApisAppId}'
+output intakeSubscriptions array = intake.outputs.subscriptions
 output gatewayPrincipalIds array = [peopleGateway.outputs.principalId, agentGateway.outputs.principalId]

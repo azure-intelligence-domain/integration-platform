@@ -1,9 +1,12 @@
 name: journey
 
-# End to end, through the platform as a person would: ACME places an order, looks it up, cancels it,
-# and tries to put the cancelled order on hold. Proves the slice: gateway → Order Process API →
-# Salesforce System API (internal, Entra token) → Cosmos DB, business events on evgt-intplat-order,
-# and every hop in the tap. Run by hand, or after a building block of the order slice deployed.
+# End to end, through the platform as a person would.
+# 1-6: ACME places an order, looks it up, cancels it, and tries to put the cancelled order on hold:
+#      gateway → Order Process API → Salesforce System API → Cosmos DB, events, every hop in the tap.
+# 7:   ACME's next order travels the whole way, by itself: SAP accepts and bills it (finance-intake),
+#      the WMS reserves stock (supply-intake), the 3PL ships it (logistics-intake), each fact turned
+#      into an order fact by the order domain's policies. The test plays the outside world that has
+#      no Experience API yet (step 7): the partner's delivery notice and the bank's payment.
 
 on:
   workflow_dispatch:
@@ -37,6 +40,9 @@ jobs:
           token=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
           echo "::add-mask::$token"; echo "STORAGE_TOKEN=$token" >> "$GITHUB_ENV"
           echo "IDEMPOTENCY_KEY=journey-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          # The platform's own identity is an allow-listed internal caller (routing/internal-callers.yaml).
+          token=$(az account get-access-token --resource api://e3337087-144a-4b2e-8faa-c802660b9dee --query accessToken -o tsv)
+          echo "::add-mask::$token"; echo "PLATFORM_TOKEN=$token" >> "$GITHUB_ENV"
 
       - name: Tap baseline
         run: |
@@ -122,3 +128,38 @@ jobs:
             echo "attempt $attempt: $((${now:-0} - TAP_BASELINE)) new, waiting for 19"; sleep 10
           done
           echo "::error::Not every hop reached the tap"; exit 1
+
+      - name: 7. ACME's next order travels the whole way, placed → completed
+        run: |
+          order_call() { curl -s -H "Ocp-Apim-Subscription-Key: $APIM_KEY" -H "Correlation-Id: $CORRELATION" "$@"; }
+          internal() { curl -s -H "Authorization: Bearer $PLATFORM_TOKEN" -H "Correlation-Id: $CORRELATION" -H "Content-Type: application/json" "$@"; }
+          wait_for() {  # wait_for <status> [paymentStatus]: the policies move the order, not this test
+            for attempt in $(seq 1 40); do
+              now=$(order_call "$GATEWAY/order/orders/$ORDER" | jq -r '"\(.status) \(.paymentStatus)"')
+              [ "$now" != "$last" ] && echo "  order $ORDER: $now" && last=$now
+              if [ "${now%% *}" = "$1" ] && { [ -z "${2:-}" ] || [ "${now#* }" = "$2" ]; }; then return 0; fi
+              case "$now" in rejected*|cancelled*) echo "::error::order $ORDER ended $now"; return 1 ;; esac
+              sleep 6
+            done
+            echo "::error::order $ORDER never reached $1 ${2:-}"; return 1
+          }
+          CORRELATION=journey-full-$GITHUB_RUN_ID
+          ORDER=$(order_call -X POST "$GATEWAY/order/orders" -H "Content-Type: application/json" -H "Idempotency-Key: full-$IDEMPOTENCY_KEY" \
+            -d '{"customerId":"ACME","channel":"salesforce","orderLines":[{"productId":"SKU-1042","quantity":12,"unitPrice":{"value":7000.0,"currency":"EUR"}}],"deliveryAddress":{"street":"Rue de la Loi 16","postalCode":"1000","city":"Brussels","countryCode":"BE"},"requestedDeliveryDate":"2026-10-30"}' | jq -r .orderId)
+          CORRELATION=ord-$ORDER; last=""
+          echo "✅ order $ORDER placed"
+          wait_for shipped
+          echo "✅ SAP accepted and billed it, the WMS reserved stock, the 3PL dispatched it: all by events"
+
+          shipment=SPD-$(printf '%06d' "$ORDER")
+          status=$(internal -o delivered.json -w '%{http_code}' -X POST "$GATEWAY/3pl/shipments/$shipment/delivery" -d '{"receivedBy":"J. Peeters"}')
+          test "$status" = 200; echo "✅ the partner's delivery notice for $shipment"
+          wait_for delivered invoiced
+
+          invoice=$(internal "$GATEWAY/sap/invoices?orderId=$ORDER" | jq -c '._embedded.invoices[0]')
+          number=$(jq -r .invoiceNumber <<< "$invoice"); amount=$(jq -c .amount <<< "$invoice")
+          status=$(internal -o paid.json -w '%{http_code}' -X POST "$GATEWAY/sap/payments" -d "{\"invoiceNumber\":\"$number\",\"amount\":$amount}")
+          test "$status" = 201; echo "✅ the bank paid invoice $number"
+          wait_for completed paid
+          echo "✅ order $ORDER completed: delivered and paid"
+

@@ -1,7 +1,8 @@
 // The tap's storage, in rg-intplat-tap: never deleted by the kill switch (ADR 0011).
 // - Queue tap-events: every CloudEvent from every topic, kept without expiry until the
 //   Intelligence domain drains it (phase 2).
-// - Container tap-deadletter: events Event Grid could not deliver (e.g. over the 64 KB queue limit).
+// - Container tap-deadletter: events Event Grid could not deliver to the tap (e.g. over 64 KB).
+// - Container deadletters: events a consumer could not handle (ADR 0016), per topic and consumer.
 // - Log Analytics data export writes the telemetry here too (containers am-<table>).
 // Entra ID only. The topics deliver with their own managed identity.
 
@@ -55,6 +56,13 @@ resource deadLetter 'Microsoft.Storage/storageAccounts/blobServices/containers@2
   name: 'tap-deadletter'
 }
 
+// Events a consumer could not handle after Event Grid's retries (ADR 0016): the Intelligence
+// domain sees failed deliveries next to everything else.
+resource consumerDeadLetters 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: blobs
+  name: 'deadletters'
+}
+
 resource topicsSend 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
   for principalId in topicPrincipalIds: {
     name: guid(tap.id, principalId, queueSender)
@@ -95,3 +103,4 @@ resource pipelineReads 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
 output storageId string = tap.id
 output queueName string = events.name
 output deadLetterContainer string = deadLetter.name
+output consumerDeadLetterContainer string = consumerDeadLetters.name

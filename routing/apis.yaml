@@ -24,3 +24,27 @@ apis:
     backend: func-intplat-system-api-salesforce
     gateways:
       people: system-apis
+
+  - name: system-api-sap
+    repository: system-api-sap
+    release: v1.1.0
+    path: sap
+    backend: func-intplat-system-api-sap
+    gateways:
+      people: system-apis
+
+  - name: system-api-wms
+    repository: system-api-wms
+    release: v1.0.0
+    path: wms
+    backend: func-intplat-system-api-wms
+    gateways:
+      people: system-apis
+
+  - name: system-api-3pl
+    repository: system-api-3pl
+    release: v1.0.0
+    path: 3pl
+    backend: func-intplat-system-api-3pl
+    gateways:
+      people: system-apis

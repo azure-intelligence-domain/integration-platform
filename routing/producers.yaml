@@ -3,3 +3,9 @@
 producers:
   - identity: id-intplat-process-api-order-runtime
     topics: [order]
+  - identity: id-intplat-system-api-sap-runtime
+    topics: [finance]
+  - identity: id-intplat-system-api-wms-runtime
+    topics: [supply]
+  - identity: id-intplat-system-api-3pl-runtime
+    topics: [logistics]

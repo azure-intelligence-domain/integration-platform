@@ -1,0 +1,43 @@
+# Who receives which facts (ADR 0015, 0016). For every entry the platform creates an Event Grid
+# subscription per topic, filtered on the event types, that pushes each event through the gateway's
+# event intake (POST /intake/<name>) to the consumer's backend. Failed deliveries are retried, then
+# dead-lettered into the tap storage (container deadletters, folder per topic and consumer).
+#
+#   receives  topic (evgt-intplat-<topic>) → event types
+#   backend   logicApp (trigger "event") or function (route POST /intake), with its resource group
+consumers:
+  - name: finance-intake
+    receives:
+      order: [com.acme.order.placed]
+    backend:
+      logicApp: la-intplat-finance-intake
+      resourceGroup: rg-intplat-finance-intake
+
+  - name: supply-intake
+    receives:
+      order: [com.acme.order.confirmed]
+    backend:
+      logicApp: la-intplat-supply-intake
+      resourceGroup: rg-intplat-supply-intake
+
+  - name: logistics-intake
+    receives:
+      order: [com.acme.order.readyForShipment]
+    backend:
+      logicApp: la-intplat-logistics-intake
+      resourceGroup: rg-intplat-logistics-intake
+
+  - name: process-api-order
+    receives:
+      finance:
+        - com.acme.finance.salesOrderAccepted
+        - com.acme.finance.salesOrderRefused
+        - com.acme.finance.invoiceIssued
+        - com.acme.finance.paymentReceived
+      supply: [com.acme.supply.stockReserved]
+      logistics:
+        - com.acme.logistics.shipmentDispatched
+        - com.acme.logistics.shipmentDelivered
+    backend:
+      function: func-intplat-process-api-order
+      resourceGroup: rg-intplat-process-api-order
