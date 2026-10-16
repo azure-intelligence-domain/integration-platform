@@ -51,6 +51,8 @@ jobs:
       id-token: write
     env:
       RESOURCE_GROUP: rg-intplat-platform
+      AGENT_AUDIENCE: api://881433d3-4894-411b-8b31-6912a67ef43f
+      TAP_QUEUE_URL: https://sttapintplatdemo.queue.core.windows.net/tap-events
     steps:
       - uses: actions/checkout@v4
 
@@ -61,32 +63,62 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      # The GitHub OIDC assertion is only valid for minutes; creating API Management takes longer.
+      # So every token the job needs is acquired now (each valid for about an hour) and masked.
+      - name: Acquire tokens and identities
+        run: |
+          for pair in EVENTGRID_TOKEN=https://eventgrid.azure.net STORAGE_TOKEN=https://storage.azure.com AGENT_TOKEN=$AGENT_AUDIENCE; do
+            token=$(az account get-access-token --resource "${pair#*=}" --query accessToken -o tsv)
+            echo "::add-mask::$token"
+            echo "${pair%%=*}=$token" >> "$GITHUB_ENV"
+          done
+          echo "PIPELINE_PRINCIPAL=$(az identity show -g rg-intplat-identities -n id-intplat-platform --query principalId -o tsv)" >> "$GITHUB_ENV"
+          echo "BLOCK_PRINCIPALS=$(az identity list -g rg-intplat-identities --query '[].principalId' -o json | jq -c .)" >> "$GITHUB_ENV"
+          echo "CORRELATION_ID=smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+
       - name: What-if
         env:
           PUBLISHER_EMAIL: ${{ secrets.APIM_PUBLISHER_EMAIL }}
         run: |
           az deployment group what-if -g "$RESOURCE_GROUP" -n platform -f infra/main.bicep \
-            -p publisherEmail="$PUBLISHER_EMAIL"
+            -p publisherEmail="$PUBLISHER_EMAIL" pipelinePrincipalId="$PIPELINE_PRINCIPAL" \
+               buildingBlockPrincipalIds="$BLOCK_PRINCIPALS"
 
       - name: Deploy
         env:
           PUBLISHER_EMAIL: ${{ secrets.APIM_PUBLISHER_EMAIL }}
         run: |
           outputs=$(az deployment group create -g "$RESOURCE_GROUP" -n platform -f infra/main.bicep \
-            -p publisherEmail="$PUBLISHER_EMAIL" --query properties.outputs -o json)
-          echo "GATEWAY=$(echo "$outputs" | jq -r .gatewayUrl.value)" >> "$GITHUB_ENV"
-          echo "APIM=$(echo "$outputs" | jq -r .apiManagementName.value)" >> "$GITHUB_ENV"
+            -p publisherEmail="$PUBLISHER_EMAIL" pipelinePrincipalId="$PIPELINE_PRINCIPAL" \
+               buildingBlockPrincipalIds="$BLOCK_PRINCIPALS" --query properties.outputs -o json)
+          echo "GATEWAY=$(echo "$outputs" | jq -r .peopleGatewayUrl.value)" >> "$GITHUB_ENV"
+          echo "AGENT_GATEWAY=$(echo "$outputs" | jq -r .agentGatewayUrl.value)" >> "$GITHUB_ENV"
           echo "WORKSPACE=$(echo "$outputs" | jq -r .workspaceCustomerId.value)" >> "$GITHUB_ENV"
-          echo "$outputs" | jq -r '.topicEndpoints.value[] | "topic \(.domain): \(.endpoint)"'
+          echo "TOPICS=$(echo "$outputs" | jq -c '[.topics.value[].endpoint]')" >> "$GITHUB_ENV"
+          echo "$outputs" | jq -r '.topics.value[] | "topic \(.name): \(.endpoint)"'
 
-      - name: Fetch the smoke-test subscription key (never stored)
+      - name: Fetch the smoke-test subscription keys (never stored)
         run: |
-          key=$(az rest --method post --url "https://management.azure.com/subscriptions/$(az account show --query id -o tsv)/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.ApiManagement/service/$APIM/subscriptions/smoke-test/listSecrets?api-version=2024-05-01" --query primaryKey -o tsv)
-          echo "::add-mask::$key"
-          echo "APIM_KEY=$key" >> "$GITHUB_ENV"
-          echo "CORRELATION_ID=smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+          sub=$(az account show --query id -o tsv)
+          for pair in APIM_KEY=apim-intplat-demo AGENT_KEY=apim-intplat-agents; do
+            key=$(az rest --method post --url "https://management.azure.com/subscriptions/$sub/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.ApiManagement/service/${pair#*=}/subscriptions/smoke-test/listSecrets?api-version=2024-05-01" --query primaryKey -o tsv)
+            echo "::add-mask::$key"
+            echo "${pair%%=*}=$key" >> "$GITHUB_ENV"
+          done
 
-      - name: Smoke test — the gateway answers and echoes the journey
+      - name: Tap baseline
+        run: |
+          count() { curl -s -I "$TAP_QUEUE_URL?comp=metadata" -H "Authorization: Bearer $STORAGE_TOKEN" \
+            -H "x-ms-version: 2021-08-06" | tr -d '\r' | awk -F': ' 'tolower($1)=="x-ms-approximate-messages-count"{print $2}'; }
+          for attempt in $(seq 1 18); do  # new role assignments can take a few minutes
+            baseline=$(count); [ -n "$baseline" ] && break
+            echo "attempt $attempt: tap queue not readable yet"; sleep 10
+          done
+          test -n "$baseline"
+          echo "TAP_BASELINE=$baseline" >> "$GITHUB_ENV"
+          echo "tap queue holds $baseline message(s)"
+
+      - name: Smoke test — people gateway answers and echoes the journey
         run: |
           url="$GATEWAY/platform/health"
           for attempt in $(seq 1 18); do  # a new Consumption gateway can take a few minutes
@@ -100,20 +132,77 @@ jobs:
           grep -qi '^content-type: application/hal+json' headers.txt
           grep -qi "^correlation-id: $CORRELATION_ID" headers.txt
           test "$(jq -r .correlationId body.json)" = "$CORRELATION_ID"
-          test "$(jq -r .status body.json)" = available
-          echo "✅ 200, HAL, Correlation-Id echoed"
+          echo "✅ people gateway: 200, HAL, Correlation-Id echoed"
 
       - name: Smoke test — every call needs a valid Correlation-Id
         run: |
           for header in "" "Correlation-Id: ORD 4711"; do
             status=$(curl -s -o problem.json -D headers.txt -w '%{http_code}' "$GATEWAY/platform/health" \
               -H "Ocp-Apim-Subscription-Key: $APIM_KEY" ${header:+-H "$header"})
-            cat problem.json; echo
             test "$status" = 400
             grep -qi '^content-type: application/problem+json' headers.txt
             test "$(jq -r .title problem.json)" = "Correlation Id Required"
           done
           echo "✅ missing and invalid Correlation-Id rejected with Problem Details"
+
+      - name: Smoke test — a mutation through the people gateway
+        run: |
+          status=$(curl -s -o probe.json -w '%{http_code}' -X POST "$GATEWAY/platform/health/probes" \
+            -H "Ocp-Apim-Subscription-Key: $APIM_KEY" -H "Correlation-Id: $CORRELATION_ID" \
+            -H "Content-Type: application/json" -d '{"note":"smoke test, people gateway"}')
+          cat probe.json; echo
+          test "$status" = 201
+          echo "✅ people gateway: POST probe 201"
+
+      - name: Smoke test — the agent gateway only lets agents in
+        run: |
+          for attempt in $(seq 1 18); do
+            status=$(curl -s -o problem.json -D headers.txt -w '%{http_code}' "$AGENT_GATEWAY/platform/health" \
+              -H "Ocp-Apim-Subscription-Key: $AGENT_KEY" -H "Correlation-Id: $CORRELATION_ID")
+            [ "$status" = 401 ] && break
+            echo "attempt $attempt: HTTP $status"; sleep 10
+          done
+          cat problem.json; echo
+          test "$status" = 401
+          grep -qi '^content-type: application/problem+json' headers.txt
+          test "$(jq -r .title problem.json)" = "Agent Token Required"
+          echo "✅ agent gateway: no token, 401 Problem Details"
+
+          status=$(curl -s -o body.json -w '%{http_code}' "$AGENT_GATEWAY/platform/health" \
+            -H "Authorization: Bearer $AGENT_TOKEN" -H "Ocp-Apim-Subscription-Key: $AGENT_KEY" \
+            -H "Correlation-Id: $CORRELATION_ID")
+          cat body.json; echo
+          test "$status" = 200
+          status=$(curl -s -o probe.json -w '%{http_code}' -X POST "$AGENT_GATEWAY/platform/health/probes" \
+            -H "Authorization: Bearer $AGENT_TOKEN" -H "Ocp-Apim-Subscription-Key: $AGENT_KEY" \
+            -H "Correlation-Id: $CORRELATION_ID" -H "Content-Type: application/json" -d '{"note":"smoke test, agent"}')
+          test "$status" = 201
+          echo "✅ agent gateway: agent token accepted, GET 200, POST 201"
+
+      - name: Smoke test — every topic and both gateways feed the tap
+        run: |
+          # One probe per topic (type com.acme.platform.tap.probe: only the tap subscribes to it).
+          for endpoint in $(echo "$TOPICS" | jq -r '.[]'); do
+            event=$(jq -n --arg id "$(uuidgen)" --arg time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg cid "$CORRELATION_ID" \
+              '{specversion:"1.0", id:$id, source:"/integration-platform/smoke-test", type:"com.acme.platform.tap.probe",
+                time:$time, datacontenttype:"application/json", correlationid:$cid, componentid:"tap-probe", data:{}}')
+            for attempt in $(seq 1 18); do  # new role assignments can take a few minutes
+              status=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$endpoint" -H "Authorization: Bearer $EVENTGRID_TOKEN" \
+                -H "Content-Type: application/cloudevents+json; charset=utf-8" -d "$event")
+              [ "$status" = 200 ] && break
+              echo "attempt $attempt: $endpoint HTTP $status"; sleep 10
+            done
+            test "$status" = 200
+          done
+          # 5 topic probes + 1 people mutation + 2 agent actions.
+          expected=$((TAP_BASELINE + 8))
+          for attempt in $(seq 1 30); do
+            now=$(curl -s -I "$TAP_QUEUE_URL?comp=metadata" -H "Authorization: Bearer $STORAGE_TOKEN" -H "x-ms-version: 2021-08-06" \
+              | tr -d '\r' | awk -F': ' 'tolower($1)=="x-ms-approximate-messages-count"{print $2}')
+            if [ "${now:-0}" -ge "$expected" ]; then echo "✅ tap: ${now} message(s), at least 8 new"; exit 0; fi
+            echo "attempt $attempt: tap holds ${now:-?}, waiting for $expected"; sleep 10
+          done
+          echo "::error::Not every topic or gateway reached the tap"; exit 1
 
       - name: Smoke test — the call is traced in Application Insights
         run: |
@@ -123,4 +212,19 @@ jobs:
             if [ "${count:-0}" -gt 0 ]; then echo "✅ traced: $count request(s) with $CORRELATION_ID"; exit 0; fi
             echo "attempt $attempt: not ingested yet"; sleep 20
           done
-          echo "::error::The smoke-test call never appeared in Application Insights"; exit 1
+          echo "::error::The smoke-test calls never appeared in Application Insights"; exit 1
+
+      - name: Telemetry tap (reported, not blocking)
+        run: |
+          containers=$(az storage container-rm list --storage-account sttapintplatdemo -g rg-intplat-tap --query "[?starts_with(name, 'am-')].name" -o tsv | tr '\n' ' ')
+          if [ -n "$containers" ]; then echo "✅ telemetry exported to the tap: $containers"
+          else echo "::notice::No telemetry exported yet; Log Analytics writes the export with a delay."; fi
+
+      - name: Deployment event
+        if: always()
+        uses: ./.github/actions/deployment-event
+        with:
+          token: ${{ env.EVENTGRID_TOKEN }}
+          component: integration-platform
+          version: ${{ github.sha }}
+          status: ${{ job.status }}

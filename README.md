@@ -2,8 +2,10 @@
 
 The shared foundation of the
 [AI Intelligence Domain demo](https://github.com/azure-intelligence-domain/ai-intelligence-domain)
-integration platform. Owned by the **platform team**. Decision:
-[ADR 0010](https://github.com/azure-intelligence-domain/ai-intelligence-domain/blob/main/docs/adr/0010-platform-core.md).
+integration platform. Owned by the **platform team**. Decisions: [ADR 0010](https://github.com/azure-intelligence-domain/ai-intelligence-domain/blob/main/docs/adr/0010-platform-core.md)
+(platform core), [ADR 0011](https://github.com/azure-intelligence-domain/ai-intelligence-domain/blob/main/docs/adr/0011-tap-by-default.md)
+(tap by default), [ADR 0012](https://github.com/azure-intelligence-domain/ai-intelligence-domain/blob/main/docs/adr/0012-agent-gateway.md)
+(agent gateway).
 
 ```mermaid
 flowchart TB
@@ -34,9 +36,30 @@ flowchart TB
 | Application Insights | `appi-intplat-demo` | Workspace-based. |
 | Log Analytics | `log-intplat-demo` | 30-day retention, **daily cap 0.15 GB** (within the free 5 GB per month). |
 
+## Two gateways
+
+| Gateway | For | Login | Tapped |
+|---|---|---|---|
+| `apim-intplat-demo` | People and websites | Subscription key | Every mutation (POST, PUT, PATCH, DELETE) |
+| `apim-intplat-agents` | AI agents | Entra ID token of an agent with `Agent.Act`, plus subscription key; 60 calls/min | Every call, with the agent's identity |
+
+## Tap by default
+
+Everything that enters the platform can be tapped by the Intelligence domain (ADR 0011):
+
+| Channel | Source | Lands in (`rg-intplat-tap`, survives the kill switch) |
+|---|---|---|
+| Events | Business events on every domain topic; gateway mutations, agent actions and deployments on `evgt-intplat-platform` | Queue `tap-events` in `sttapintplatdemo`, no expiry |
+| Telemetry | Every API call, dependency and error; Event Grid and Service Bus logs | Containers `am-<table>` in `sttapintplatdemo` (Log Analytics data export) |
+
+The platform creates a `tap` subscription on every topic and the gateways emit their events in their
+global policies: no producer can forget it or opt out. Every pipeline publishes a deployment event
+with [`.github/actions/deployment-event`](.github/actions/deployment-event/action.yml).
+
 ## The gateway enforces the one rule
 
-One global policy ([`infra/policies/global.xml`](infra/policies/global.xml)) applies to every
+The global policies ([`people-gateway.xml`](infra/policies/people-gateway.xml),
+[`agent-gateway.xml`](infra/policies/agent-gateway.xml)) apply to every
 API, now and in the future: a call without a valid `Correlation-Id` gets
 `400` [Correlation Id Required](docs/problems/correlation-id-required.md), and every response
 echoes the `Correlation-Id`.

@@ -1,28 +1,54 @@
 <!--
-  [Platform] Health API: answered by API Management itself, no backend.
-  The global policy has already checked the Correlation-Id header.
+  [Platform] Health API: answered by API Management itself, no backend, on both gateways.
+  GET /health: the gateway is available. POST /health/probes: a mutation, to prove the tap.
+  The global policy has already checked the token (agent gateway) and the Correlation-Id.
 -->
 <policies>
   <inbound>
     <base />
-    <return-response>
-      <set-status code="200" reason="OK" />
-      <set-header name="Content-Type" exists-action="override">
-        <value>application/hal+json</value>
-      </set-header>
-      <set-header name="Correlation-Id" exists-action="override">
-        <value>@(context.Request.Headers.GetValueOrDefault("Correlation-Id", ""))</value>
-      </set-header>
-      <set-body>@{
-        return new JObject(
-          new JProperty("_links", new JObject(
-            new JProperty("self", new JObject(new JProperty("href", "/platform/health"))))),
-          new JProperty("status", "available"),
-          new JProperty("correlationId", context.Request.Headers.GetValueOrDefault("Correlation-Id", "")),
-          new JProperty("checkedAt", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"))
-        ).ToString();
-      }</set-body>
-    </return-response>
+    <choose>
+      <when condition='@(context.Request.Method == "POST")'>
+        <return-response>
+          <set-status code="201" reason="Created" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/hal+json</value>
+          </set-header>
+          <set-header name="Correlation-Id" exists-action="override">
+            <value>@(context.Request.Headers.GetValueOrDefault("Correlation-Id", ""))</value>
+          </set-header>
+          <set-body>@{
+            var probeId = context.RequestId.ToString();
+            return new JObject(
+              new JProperty("_links", new JObject(
+                new JProperty("self", new JObject(new JProperty("href", "/platform/health/probes/" + probeId))))),
+              new JProperty("probeId", probeId),
+              new JProperty("correlationId", context.Request.Headers.GetValueOrDefault("Correlation-Id", "")),
+              new JProperty("receivedAt", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"))
+            ).ToString();
+          }</set-body>
+        </return-response>
+      </when>
+      <otherwise>
+        <return-response>
+          <set-status code="200" reason="OK" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/hal+json</value>
+          </set-header>
+          <set-header name="Correlation-Id" exists-action="override">
+            <value>@(context.Request.Headers.GetValueOrDefault("Correlation-Id", ""))</value>
+          </set-header>
+          <set-body>@{
+            return new JObject(
+              new JProperty("_links", new JObject(
+                new JProperty("self", new JObject(new JProperty("href", "/platform/health"))))),
+              new JProperty("status", "available"),
+              new JProperty("correlationId", context.Request.Headers.GetValueOrDefault("Correlation-Id", "")),
+              new JProperty("checkedAt", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"))
+            ).ToString();
+          }</set-body>
+        </return-response>
+      </otherwise>
+    </choose>
   </inbound>
   <backend>
     <base />

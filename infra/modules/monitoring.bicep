@@ -35,6 +35,7 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
 }
 
 output workspaceId string = workspace.id
+output workspaceName string = workspace.name
 output workspaceCustomerId string = workspace.properties.customerId
 output appInsightsId string = appInsights.id
 output appInsightsName string = appInsights.name

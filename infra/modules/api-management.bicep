@@ -1,18 +1,40 @@
-// API Management (Consumption): the one gateway for every API on the platform.
-// Every call is traced to Application Insights (W3C), and the global policy enforces the
-// Correlation-Id header for every API.
+// One API Management (Consumption) gateway. Used twice: apim-intplat-demo for people and websites,
+// apim-intplat-agents for AI agents (ADR 0010, 0012). Each gets its own global policy, product and
+// smoke-test subscription; every call is traced to Application Insights (W3C), and the gateway's
+// managed identity may publish to the platform topic (the tap of gateway and agent actions).
 
+param name string
 param location string
 param tags object
 param publisherEmail string
 param appInsightsName string
 
+@description('Global policy (XML), applies to every API on this gateway.')
+param globalPolicy string
+
+@description('The product APIs are published in on this gateway.')
+param product object
+
+@description('Optional product-level policy (XML), for example rate limits.')
+param productPolicy string = ''
+
+@description('Named values referenced by the policies as {{name}}.')
+param namedValues object = {}
+
+param platformTopicName string = 'evgt-intplat-platform'
+
+var dataSender = 'd5a91429-5739-47e2-a06b-3470a27159e7' // EventGrid Data Sender
+
 resource appInsights 'Microsoft.Insights/components@2020-02-02' existing = {
   name: appInsightsName
 }
 
+resource platformTopic 'Microsoft.EventGrid/topics@2025-02-15' existing = {
+  name: platformTopicName
+}
+
 resource apim 'Microsoft.ApiManagement/service@2024-05-01' = {
-  name: 'apim-intplat-demo'
+  name: name
   location: location
   tags: tags
   sku: {
@@ -27,6 +49,28 @@ resource apim 'Microsoft.ApiManagement/service@2024-05-01' = {
     publisherName: 'Azure Intelligence Domain'
   }
 }
+
+resource publishesActions 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(platformTopic.id, apim.id, dataSender)
+  scope: platformTopic
+  properties: {
+    principalId: apim.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', dataSender)
+    description: '${name}: publishes gateway actions to the tap.'
+  }
+}
+
+resource values 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = [
+  for item in items(namedValues): {
+    parent: apim
+    name: item.key
+    properties: {
+      displayName: item.key
+      value: item.value
+    }
+  }
+]
 
 resource logger 'Microsoft.ApiManagement/service/loggers@2024-05-01' = {
   parent: apim
@@ -64,24 +108,34 @@ resource tracing 'Microsoft.ApiManagement/service/diagnostics@2024-05-01' = {
   }
 }
 
-resource globalPolicy 'Microsoft.ApiManagement/service/policies@2024-05-01' = {
+resource policy 'Microsoft.ApiManagement/service/policies@2024-05-01' = {
   parent: apim
   name: 'policy'
+  dependsOn: [values, publishesActions]
   properties: {
-    format: 'rawxml'
-    value: loadTextContent('../policies/global.xml')
+    format: 'xml'
+    value: globalPolicy
   }
 }
 
-resource platformProduct 'Microsoft.ApiManagement/service/products@2024-05-01' = {
+resource apiProduct 'Microsoft.ApiManagement/service/products@2024-05-01' = {
   parent: apim
-  name: 'platform'
+  name: product.name
   properties: {
-    displayName: 'Platform'
-    description: 'APIs of the integration platform itself.'
+    displayName: product.displayName
+    description: product.description
     subscriptionRequired: true
     approvalRequired: false
     state: 'published'
+  }
+}
+
+resource apiProductPolicy 'Microsoft.ApiManagement/service/products/policies@2024-05-01' = if (!empty(productPolicy)) {
+  parent: apiProduct
+  name: 'policy'
+  properties: {
+    format: 'xml'
+    value: productPolicy
   }
 }
 
@@ -102,13 +156,13 @@ resource healthApiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-
   parent: healthApi
   name: 'policy'
   properties: {
-    format: 'rawxml'
+    format: 'xml'
     value: loadTextContent('../policies/health-api.xml')
   }
 }
 
 resource healthInProduct 'Microsoft.ApiManagement/service/products/apis@2024-05-01' = {
-  parent: platformProduct
+  parent: apiProduct
   name: healthApi.name
 }
 
@@ -118,7 +172,7 @@ resource smokeTest 'Microsoft.ApiManagement/service/subscriptions@2024-05-01' = 
   name: 'smoke-test'
   properties: {
     displayName: 'Smoke test (platform pipeline)'
-    scope: platformProduct.id
+    scope: apiProduct.id
     state: 'active'
   }
 }

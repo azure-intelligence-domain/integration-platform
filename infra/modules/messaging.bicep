@@ -1,17 +1,22 @@
-// Messaging: one Event Grid topic per domain (CloudEvents 1.0) and one Service Bus namespace
-// (Basic) for the subscriber queues. Entra ID only: no keys or connection strings anywhere.
+// Messaging: one Event Grid topic per business domain plus the platform topic (gateway actions,
+// agent actions, deployments), all CloudEvents 1.0, and one Service Bus namespace (Basic) for the
+// subscriber queues. Entra ID only: no keys or connection strings anywhere.
 // The names match the shared landscape in the contracts repository.
 
 param location string
 param tags object
-param domains array
+param topicNames array
 param workspaceId string
 
 resource topics 'Microsoft.EventGrid/topics@2025-02-15' = [
-  for domain in domains: {
-    name: 'evgt-intplat-${domain}'
+  for name in topicNames: {
+    name: 'evgt-intplat-${name}'
     location: location
-    tags: union(tags, { domain: domain })
+    tags: union(tags, { domain: name })
+    // The topic's own identity delivers to the tap, so the tap needs no keys either.
+    identity: {
+      type: 'SystemAssigned'
+    }
     properties: {
       inputSchema: 'CloudEventSchemaV1_0'
       disableLocalAuth: true
@@ -20,12 +25,14 @@ resource topics 'Microsoft.EventGrid/topics@2025-02-15' = [
   }
 ]
 
+// Resource-specific tables (Dedicated): AzureDiagnostics cannot be exported to the tap.
 resource topicDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = [
-  for (domain, i) in domains: {
+  for (name, i) in topicNames: {
     name: 'to-log-analytics'
     scope: topics[i]
     properties: {
       workspaceId: workspaceId
+      logAnalyticsDestinationType: 'Dedicated'
       logs: [
         {
           categoryGroup: 'allLogs'
@@ -55,6 +62,7 @@ resource serviceBusDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01
   scope: serviceBus
   properties: {
     workspaceId: workspaceId
+    logAnalyticsDestinationType: 'Dedicated'
     logs: [
       {
         categoryGroup: 'allLogs'
@@ -64,5 +72,11 @@ resource serviceBusDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01
   }
 }
 
-output topicEndpoints array = [for (domain, i) in domains: { domain: domain, endpoint: topics[i].properties.endpoint }]
+output topics array = [
+  for (name, i) in topicNames: {
+    name: topics[i].name
+    endpoint: topics[i].properties.endpoint
+    principalId: topics[i].identity.principalId
+  }
+]
 output serviceBusName string = serviceBus.name

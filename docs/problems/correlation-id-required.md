@@ -8,7 +8,7 @@ journey the call belongs to, for example `ord-4711`. It has the same format as t
 hyphens, at most 64 characters.
 
 API Management enforces this for every API with one global policy
-([`infra/policies/global.xml`](../../infra/policies/global.xml)), so synchronous calls and
+([`people-gateway.xml`](../../infra/policies/people-gateway.xml), [`agent-gateway.xml`](../../infra/policies/agent-gateway.xml)), so synchronous calls and
 events of the same journey can always be connected.
 
 ```http

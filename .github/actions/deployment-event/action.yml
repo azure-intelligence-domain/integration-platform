@@ -1,0 +1,47 @@
+name: Deployment event
+description: >-
+  Publish a deployment as a CloudEvent (com.acme.platform.deployment.completed) to the platform
+  topic, so the tap and the Intelligence domain know what changed when ("deploy v2.4 of
+  stock-to-3pl"). Every building block calls this at the end of its deploy job (ADR 0011).
+inputs:
+  token:
+    description: Entra ID access token for https://eventgrid.azure.net (acquired right after the OIDC login).
+    required: true
+  component:
+    description: The building block or flow that was deployed, e.g. stock-to-3pl.
+    required: true
+  version:
+    description: The version that was deployed.
+    required: true
+  status:
+    description: Outcome of the deploy job (success, failure, cancelled).
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Publish deployment event
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.token }}
+        COMPONENT: ${{ inputs.component }}
+        VERSION: ${{ inputs.version }}
+        STATUS: ${{ inputs.status }}
+      run: |
+        event=$(jq -n \
+          --arg id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+          --arg source "/github/$GITHUB_REPOSITORY" \
+          --arg time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          --arg correlation "deploy-$GITHUB_RUN_ID" \
+          --arg component "$COMPONENT" --arg version "$VERSION" --arg status "$STATUS" \
+          --arg commit "$GITHUB_SHA" --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+          --arg actor "$GITHUB_ACTOR" \
+          '{specversion: "1.0", id: $id, source: $source, type: "com.acme.platform.deployment.completed",
+            time: $time, datacontenttype: "application/json", correlationid: $correlation, componentid: $component,
+            data: {repository: env.GITHUB_REPOSITORY, version: $version, status: $status, commit: $commit,
+                   run: $run, actor: $actor}}')
+        status_code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+          "https://evgt-intplat-platform.belgiumcentral-1.eventgrid.azure.net/api/events" \
+          -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/cloudevents+json; charset=utf-8" \
+          -d "$event")
+        echo "deployment event for $COMPONENT $VERSION ($STATUS): HTTP $status_code"
+        test "$status_code" = 200
