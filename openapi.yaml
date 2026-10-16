@@ -1,11 +1,11 @@
 openapi: 3.0.3
 info:
   title: '[Platform] Health API'
-  version: 1.0.0
-  description: >-
-    Health of the integration platform's gateway. Answered by API Management itself, without a
-    backend, so it proves that the gateway, its policies and its tracing work. Like every API on
-    the platform, it requires the Correlation-Id header: the gateway rejects calls without it.
+  version: 1.1.0
+  description: Health of the integration platform's gateways. Answered by API Management itself, without
+    a backend, so it proves that the gateways, their policies, their tracing and the tap work. Like every
+    API on the platform, it requires the Correlation-Id header. On the agent gateway, every call also
+    needs an Entra ID token of an agent holding the Agent.Act role.
   contact:
     name: Integration Platform Team
     url: https://github.com/azure-intelligence-domain/integration-platform
@@ -18,26 +18,30 @@ externalDocs:
   description: EventCatalog entry of the integration platform
   url: https://stcatalogxyxd4f2znqkqy.z50.web.core.windows.net/docs/domains/platform/1.0.0
 servers:
-  - url: https://apim-intplat-demo.azure-api.net/platform
-    description: Azure API Management (Consumption), demo environment. No version in the URI.
+- url: https://apim-intplat-demo.azure-api.net/platform
+  description: Gateway for people and websites (API Management Consumption, demo). No version in the URI.
+- url: https://apim-intplat-agents.azure-api.net/platform
+  description: 'Gateway for AI agents (API Management Consumption, demo): Entra ID token per agent, every
+    call audited in the tap.'
 security:
-  - subscriptionKey: []
+- subscriptionKey: []
+- subscriptionKey: []
+  agentToken: []
 tags:
-  - name: Health
-    description: Health of the integration platform.
+- name: Health
+  description: Health of the integration platform.
 paths:
   /health:
     x-summary: Platform Health
     get:
       tags:
-        - Health
+      - Health
       operationId: retrievePlatformHealth
       summary: Retrieve Platform Health
-      description: >-
-        Returns the gateway's health and echoes the correlation id, so a caller can follow the
-        call in the platform's tracing.
+      description: Returns the gateway's health and echoes the correlation id, so a caller can follow
+        the call in the platform's tracing.
       parameters:
-        - $ref: '#/components/parameters/correlationId'
+      - $ref: '#/components/parameters/correlationId'
       responses:
         '200':
           description: The gateway is available.
@@ -52,8 +56,9 @@ paths:
                 status: available
                 correlationId: ord-4711
                 checkedAt: '2026-10-16T17:30:00Z'
-        '400':
-          description: The Correlation-Id header is missing or invalid. The gateway enforces this for every API.
+        '400': &id001
+          description: The Correlation-Id header is missing or invalid. The gateway enforces this for
+            every API.
           content:
             application/problem+json:
               schema:
@@ -64,6 +69,40 @@ paths:
                 status: 400
                 detail: Every call must carry a Correlation-Id header, for example ord-4711.
                 instance: /platform/health
+  /health/probes:
+    x-summary: Health Probes
+    post:
+      tags:
+      - Health
+      operationId: createHealthProbe
+      summary: Create Health Probe
+      description: A mutation answered by the gateway itself. It proves that every mutation entering the
+        platform is captured in the tap, as an action-received CloudEvent.
+      parameters:
+      - $ref: '#/components/parameters/correlationId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/probeRequest'
+            example:
+              note: smoke test after deployment
+      responses:
+        '201':
+          description: The probe was received.
+          content:
+            application/hal+json:
+              schema:
+                $ref: '#/components/schemas/probe'
+              example:
+                _links:
+                  self:
+                    href: /platform/health/probes/9d2c1b7e-4711-4e1a-9c0b-5f1e2d3c4b5a
+                probeId: 9d2c1b7e-4711-4e1a-9c0b-5f1e2d3c4b5a
+                correlationId: ord-4711
+                receivedAt: '2026-10-16T17:30:00Z'
+        '400': *id001
 components:
   securitySchemes:
     subscriptionKey:
@@ -71,17 +110,22 @@ components:
       in: header
       name: Ocp-Apim-Subscription-Key
       description: API Management subscription key of the consuming application.
+    agentToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 'Agent gateway only: a Microsoft Entra ID token for the intplat-agent-gateway application,
+        held by an agent with the Agent.Act app role.'
   parameters:
     correlationId:
       name: Correlation-Id
       in: header
       required: true
-      description: >-
-        The business journey this call belongs to, for example ord-4711. The same value as the
-        correlationid attribute of the events in that journey.
+      description: The business journey this call belongs to, for example ord-4711. The same value as
+        the correlationid attribute of the events in that journey.
       schema:
         type: string
-        pattern: '^[a-z0-9]+(-[a-z0-9]+)*$'
+        pattern: ^[a-z0-9]+(-[a-z0-9]+)*$
         maxLength: 64
       example: ord-4711
   schemas:
@@ -89,22 +133,22 @@ components:
       type: object
       description: The gateway's health.
       required:
-        - _links
-        - status
-        - correlationId
-        - checkedAt
+      - _links
+      - status
+      - correlationId
+      - checkedAt
       properties:
-        _links:
+        _links: &id002
           type: object
           description: HAL links of the resource.
           required:
-            - self
+          - self
           properties:
             self:
               type: object
               description: Link to this resource.
               required:
-                - href
+              - href
               properties:
                 href:
                   type: string
@@ -113,7 +157,7 @@ components:
           type: string
           description: Whether the gateway is available.
           enum:
-            - available
+          - available
         correlationId:
           type: string
           description: The Correlation-Id of the call, echoed back.
@@ -125,9 +169,9 @@ components:
       type: object
       description: Problem Details for HTTP APIs (RFC 9457).
       required:
-        - type
-        - title
-        - status
+      - type
+      - title
+      - status
       properties:
         type:
           type: string
@@ -145,3 +189,31 @@ components:
         instance:
           type: string
           description: URI of the request that caused the problem.
+    probeRequest:
+      type: object
+      description: An optional note about the probe.
+      properties:
+        note:
+          type: string
+          maxLength: 200
+          description: Free text, for example why the probe was sent.
+    probe:
+      type: object
+      description: A received health probe.
+      required:
+      - _links
+      - probeId
+      - correlationId
+      - receivedAt
+      properties:
+        _links: *id002
+        probeId:
+          type: string
+          description: Identifier of the probe (the gateway request id).
+        correlationId:
+          type: string
+          description: The Correlation-Id of the call, echoed back.
+        receivedAt:
+          type: string
+          format: date-time
+          description: When the gateway received the probe. ISO 8601, UTC.
