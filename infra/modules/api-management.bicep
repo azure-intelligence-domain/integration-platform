@@ -12,16 +12,25 @@ param appInsightsName string
 @description('Global policy (XML), applies to every API on this gateway.')
 param globalPolicy string
 
-@description('The product APIs are published in on this gateway.')
-param product object
+@description('Products on this gateway: name, displayName, description, subscriptionRequired, optional policy (XML). The Health API joins the first.')
+param products product[]
 
-@description('Optional product-level policy (XML), for example rate limits.')
-param productPolicy string = ''
+@description('Client ids allowed in by product policies, filled in where a policy has the comment <!-- internal callers -->.')
+param internalCallerClientIds array = []
 
 @description('Named values referenced by the policies as {{name}}.')
 param namedValues object = {}
 
 param platformTopicName string = 'evgt-intplat-platform'
+
+@export()
+type product = {
+  name: string
+  displayName: string
+  description: string
+  subscriptionRequired: bool
+  policy: string?
+}
 
 var dataSender = 'd5a91429-5739-47e2-a06b-3470a27159e7' // EventGrid Data Sender
 
@@ -118,26 +127,35 @@ resource policy 'Microsoft.ApiManagement/service/policies@2024-05-01' = {
   }
 }
 
-resource apiProduct 'Microsoft.ApiManagement/service/products@2024-05-01' = {
-  parent: apim
-  name: product.name
-  properties: {
-    displayName: product.displayName
-    description: product.description
-    subscriptionRequired: true
-    approvalRequired: false
-    state: 'published'
+resource apiProducts 'Microsoft.ApiManagement/service/products@2024-05-01' = [
+  for p in products: {
+    parent: apim
+    name: p.name
+    properties: {
+      displayName: p.displayName
+      description: p.description
+      subscriptionRequired: p.subscriptionRequired
+      approvalRequired: false
+      state: 'published'
+    }
   }
-}
+]
 
-resource apiProductPolicy 'Microsoft.ApiManagement/service/products/policies@2024-05-01' = if (!empty(productPolicy)) {
-  parent: apiProduct
-  name: 'policy'
-  properties: {
-    format: 'xml'
-    value: productPolicy
+resource apiProductPolicies 'Microsoft.ApiManagement/service/products/policies@2024-05-01' = [
+  for (p, i) in products: if (!empty(p.?policy ?? '')) {
+    parent: apiProducts[i]
+    name: 'policy'
+    dependsOn: [values]
+    properties: {
+      format: 'xml'
+      value: replace(
+        p.?policy ?? '',
+        '<!-- internal callers -->',
+        join(map(internalCallerClientIds, id => '<application-id>${id}</application-id>'), '')
+      )
+    }
   }
-}
+]
 
 resource healthApi 'Microsoft.ApiManagement/service/apis@2024-05-01' = {
   parent: apim
@@ -162,20 +180,22 @@ resource healthApiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-
 }
 
 resource healthInProduct 'Microsoft.ApiManagement/service/products/apis@2024-05-01' = {
-  parent: apiProduct
+  parent: apiProducts[0]
   name: healthApi.name
 }
 
-// Used by the pipeline's smoke test. Its key is read at deploy time and never stored.
+// Used by the pipeline's smoke and end-to-end tests, for every API on this gateway. Its key is read
+// at deploy time and never stored.
 resource smokeTest 'Microsoft.ApiManagement/service/subscriptions@2024-05-01' = {
   parent: apim
   name: 'smoke-test'
   properties: {
     displayName: 'Smoke test (platform pipeline)'
-    scope: apiProduct.id
+    scope: '${apim.id}/apis'
     state: 'active'
   }
 }
 
 output gatewayUrl string = apim.properties.gatewayUrl
 output name string = apim.name
+output principalId string = apim.identity.principalId

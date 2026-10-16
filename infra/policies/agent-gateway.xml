@@ -4,7 +4,8 @@
      app role; otherwise 401 Problem Details. Every action is attributable to one agent.
   2. The one rule: a valid Correlation-Id header, as on every gateway.
   3. Tap by default (ADR 0011): every call, reads included, is published as a CloudEvent to
-     evgt-intplat-platform, with the agent's identity.
+     evgt-intplat-platform, with the agent's identity and the business keys found in the request
+     (orderId becomes orderid, customerId becomes customerid; ADR 0013).
   Rate limits are on the "agents" product (rate-limit is not allowed at global scope).
   Format "xml": C# generics are written as &lt;Jwt&gt;; attributes holding C# strings use single quotes.
 -->
@@ -54,7 +55,7 @@
         var agentId = token?.Claims.GetValueOrDefault("appid", token?.Claims.GetValueOrDefault("azp", "")) ?? "";
         var body = context.Request.Body?.As&lt;string&gt;(preserveContent: true) ?? "";
         var truncated = body.Length > 16000;
-        return new JObject(
+        var e = new JObject(
           new JProperty("specversion", "1.0"),
           new JProperty("id", context.RequestId.ToString()),
           new JProperty("source", "/apim-intplat-agents/" + context.Api.Id),
@@ -62,17 +63,22 @@
           new JProperty("time", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")),
           new JProperty("datacontenttype", "application/json"),
           new JProperty("correlationid", context.Request.Headers.GetValueOrDefault("Correlation-Id", "")),
-          new JProperty("componentid", context.Api.Id),
-          new JProperty("data", new JObject(
-            new JProperty("gateway", "apim-intplat-agents"),
-            new JProperty("agentId", agentId),
-            new JProperty("method", context.Request.Method),
-            new JProperty("path", context.Request.OriginalUrl.Path),
-            new JProperty("operationId", context.Operation.Id),
-            new JProperty("subscription", context.Subscription?.Name ?? ""),
-            new JProperty("requestBody", truncated ? body.Substring(0, 16000) : body),
-            new JProperty("requestBodyTruncated", truncated)))
-        ).ToString();
+          new JProperty("componentid", context.Api.Id));
+        foreach (var key in new[] { "orderId", "customerId" }) {
+          var value = context.Request.MatchedParameters.GetValueOrDefault(key, context.Request.Url.Query.GetValueOrDefault(key, ""));
+          if (!string.IsNullOrEmpty(value)) { e.Add(key.ToLowerInvariant(), value); }
+        }
+        e.Add("data", new JObject(
+          new JProperty("gateway", "apim-intplat-agents"),
+          new JProperty("agentId", agentId),
+          new JProperty("method", context.Request.Method),
+          new JProperty("path", context.Request.OriginalUrl.Path),
+          new JProperty("query", context.Request.OriginalUrl.QueryString),
+          new JProperty("operationId", context.Operation?.Id ?? ""),
+          new JProperty("subscription", context.Subscription?.Name ?? ""),
+          new JProperty("requestBody", truncated ? body.Substring(0, 16000) : body),
+          new JProperty("requestBodyTruncated", truncated)));
+        return e.ToString();
       }</set-body>
       <authentication-managed-identity resource="https://eventgrid.azure.net" />
     </send-one-way-request>

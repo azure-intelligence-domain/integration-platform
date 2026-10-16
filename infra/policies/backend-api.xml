@@ -1,0 +1,22 @@
+<!--
+  Every API with a backend (routing/apis.yaml): API Management calls the backend with its own managed
+  identity, for the intplat-platform-apis application. The backend (Easy Auth) lets in only the
+  gateways' identities, so nobody can go around the gateway (ADR 0014). The backend is filled in at
+  deploy time.
+-->
+<policies>
+  <inbound>
+    <base />
+    <set-backend-service base-url="__BACKEND__" />
+    <authentication-managed-identity resource="api://{{platform-apis-app-id}}" />
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

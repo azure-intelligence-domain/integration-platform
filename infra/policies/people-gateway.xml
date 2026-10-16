@@ -2,9 +2,11 @@
   Gateway for people and websites (apim-intplat-demo): global policy, applies to every API.
   1. The one rule: every call joins a business journey through a valid Correlation-Id header
      (same format as the correlationid attribute of the event envelope).
-  2. Tap by default (ADR 0011): every mutation (POST, PUT, PATCH, DELETE) is published as a
-     CloudEvent to evgt-intplat-platform when it comes in. Its outcome (status, duration) is in the
-     telemetry tap, joined by the same request id and Correlation-Id.
+  2. Tap by default (ADR 0011): every mutation (POST, PUT, PATCH, DELETE) and every query (GET) is
+     published as a CloudEvent to evgt-intplat-platform when it comes in, with the business keys
+     found in the request (ADR 0013): parameter orderId becomes orderid, customerId becomes
+     customerid. Its outcome (status, duration) is in the telemetry tap, joined by the same request
+     id and Correlation-Id.
   Format "xml": C# generics are written as &lt;string&gt;; attributes holding C# strings use single quotes.
 -->
 <policies>
@@ -32,8 +34,9 @@
         </return-response>
       </when>
     </choose>
+    <set-variable name="tapKind" value='@(context.Request.Method == "GET" ? "query" : new[] { "POST", "PUT", "PATCH", "DELETE" }.Contains(context.Request.Method) ? "mutation" : "")' />
     <choose>
-      <when condition='@(new[] { "POST", "PUT", "PATCH", "DELETE" }.Contains(context.Request.Method))'>
+      <when condition='@((string)context.Variables["tapKind"] != "")'>
         <send-one-way-request mode="new">
           <set-url>https://evgt-intplat-platform.belgiumcentral-1.eventgrid.azure.net/api/events</set-url>
           <set-method>POST</set-method>
@@ -41,26 +44,34 @@
             <value>application/cloudevents+json; charset=utf-8</value>
           </set-header>
           <set-body>@{
-            var body = context.Request.Body?.As&lt;string&gt;(preserveContent: true) ?? "";
-            var truncated = body.Length > 16000;
-            return new JObject(
+            var kind = (string)context.Variables["tapKind"];
+            var data = new JObject(
+              new JProperty("gateway", "apim-intplat-demo"),
+              new JProperty("method", context.Request.Method),
+              new JProperty("path", context.Request.OriginalUrl.Path),
+              new JProperty("query", context.Request.OriginalUrl.QueryString),
+              new JProperty("operationId", context.Operation?.Id ?? ""),
+              new JProperty("subscription", context.Subscription?.Name ?? ""));
+            if (kind == "mutation") {
+              var body = context.Request.Body?.As&lt;string&gt;(preserveContent: true) ?? "";
+              data.Add("requestBody", body.Length > 16000 ? body.Substring(0, 16000) : body);
+              data.Add("requestBodyTruncated", body.Length > 16000);
+            }
+            var e = new JObject(
               new JProperty("specversion", "1.0"),
               new JProperty("id", context.RequestId.ToString()),
               new JProperty("source", "/apim-intplat-demo/" + context.Api.Id),
-              new JProperty("type", "com.acme.platform.gateway.mutation"),
+              new JProperty("type", "com.acme.platform.gateway." + kind),
               new JProperty("time", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")),
               new JProperty("datacontenttype", "application/json"),
               new JProperty("correlationid", context.Request.Headers.GetValueOrDefault("Correlation-Id", "")),
-              new JProperty("componentid", context.Api.Id),
-              new JProperty("data", new JObject(
-                new JProperty("gateway", "apim-intplat-demo"),
-                new JProperty("method", context.Request.Method),
-                new JProperty("path", context.Request.OriginalUrl.Path),
-                new JProperty("operationId", context.Operation.Id),
-                new JProperty("subscription", context.Subscription?.Name ?? ""),
-                new JProperty("requestBody", truncated ? body.Substring(0, 16000) : body),
-                new JProperty("requestBodyTruncated", truncated)))
-            ).ToString();
+              new JProperty("componentid", context.Api.Id));
+            foreach (var key in new[] { "orderId", "customerId" }) {
+              var value = context.Request.MatchedParameters.GetValueOrDefault(key, context.Request.Url.Query.GetValueOrDefault(key, ""));
+              if (!string.IsNullOrEmpty(value)) { e.Add(key.ToLowerInvariant(), value); }
+            }
+            e.Add("data", data);
+            return e.ToString();
           }</set-body>
           <authentication-managed-identity resource="https://eventgrid.azure.net" />
         </send-one-way-request>

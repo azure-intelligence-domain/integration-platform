@@ -194,12 +194,13 @@ jobs:
             done
             test "$status" = 200
           done
-          # 5 topic probes + 1 people mutation + 2 agent actions.
-          expected=$((TAP_BASELINE + 8))
+          # One probe per topic + 1 people query + 1 people mutation + 2 agent actions.
+          new=$(( $(echo "$TOPICS" | jq length) + 4 ))
+          expected=$((TAP_BASELINE + new))
           for attempt in $(seq 1 30); do
             now=$(curl -s -I "$TAP_QUEUE_URL?comp=metadata" -H "Authorization: Bearer $STORAGE_TOKEN" -H "x-ms-version: 2021-08-06" \
               | tr -d '\r' | awk -F': ' 'tolower($1)=="x-ms-approximate-messages-count"{print $2}')
-            if [ "${now:-0}" -ge "$expected" ]; then echo "✅ tap: ${now} message(s), at least 8 new"; exit 0; fi
+            if [ "${now:-0}" -ge "$expected" ]; then echo "✅ tap: ${now} message(s), at least $new new"; exit 0; fi
             echo "attempt $attempt: tap holds ${now:-?}, waiting for $expected"; sleep 10
           done
           echo "::error::Not every topic or gateway reached the tap"; exit 1

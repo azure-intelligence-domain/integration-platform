@@ -1,6 +1,8 @@
-// The shared foundation of the integration platform (ADR 0010, 0011, 0012), in rg-intplat-platform,
-// plus the tap in rg-intplat-tap. Deployed by this repository's own identity, which only has rights
-// on those two resource groups.
+// The shared foundation of the integration platform (ADR 0010, 0011, 0012, 0014), in
+// rg-intplat-platform, plus the tap in rg-intplat-tap. Deployed by this repository's own identity,
+// which only has rights on those two resource groups (and reads the identities).
+// The routing is configuration, in ../routing: which APIs the gateways serve, who publishes where,
+// who may call the System APIs.
 
 @description('Region of everything except API Management.')
 param location string = 'belgiumcentral'
@@ -12,10 +14,13 @@ param apiManagementLocation string = 'francecentral'
 param publisherEmail string
 
 @description('One Event Grid topic per business domain.')
-param domains array = ['sales', 'finance', 'supply', 'logistics']
+param domains array = ['sales', 'finance', 'supply', 'logistics', 'order']
 
 @description('Application (client) id of the intplat-agent-gateway Entra application (bootstrap/agent-gateway-app.sh in azure-landing-zone).')
 param agentGatewayAppId string = '881433d3-4894-411b-8b31-6912a67ef43f'
+
+@description('Application (client) id of the intplat-platform-apis Entra application, the audience of internal calls (bootstrap/platform-apis-app.sh in azure-landing-zone).')
+param platformApisAppId string = 'e3337087-144a-4b2e-8faa-c802660b9dee'
 
 @description('Principal id of this pipeline\'s identity: publishes tap probes, reads the tap queue length.')
 param pipelinePrincipalId string
@@ -29,6 +34,24 @@ var tags = {
   owner: 'platform-team'
 }
 var topicNames = concat(domains, ['platform'])
+var apis = loadYamlContent('../routing/apis.yaml').apis
+var producers = loadYamlContent('../routing/producers.yaml').producers
+var internalCallers = loadYamlContent('../routing/internal-callers.yaml').callers
+
+// Runtime identities are created by the landing zone; the routing names them, Azure resolves them.
+resource producerIdentities 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = [
+  for p in producers: {
+    scope: resourceGroup('rg-intplat-identities')
+    name: p.identity
+  }
+]
+
+resource callerIdentities 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = [
+  for name in internalCallers: {
+    scope: resourceGroup('rg-intplat-identities')
+    name: name
+  }
+]
 
 module monitoring 'modules/monitoring.bicep' = {
   name: 'monitoring'
@@ -76,6 +99,12 @@ module publishers 'modules/publishers.bicep' = {
   params: {
     allTopicsPrincipalIds: [pipelinePrincipalId]
     platformTopicPrincipalIds: buildingBlockPrincipalIds
+    producers: [
+      for (p, i) in producers: {
+        principalId: producerIdentities[i].properties.principalId
+        topics: p.topics
+      }
+    ]
   }
 }
 
@@ -89,10 +118,31 @@ module peopleGateway 'modules/api-management.bicep' = {
     publisherEmail: publisherEmail
     appInsightsName: monitoring.outputs.appInsightsName
     globalPolicy: loadTextContent('policies/people-gateway.xml')
-    product: {
-      name: 'platform'
-      displayName: 'Platform'
-      description: 'APIs of the integration platform itself.'
+    products: [
+      {
+        name: 'platform'
+        displayName: 'Platform'
+        description: 'APIs of the integration platform itself.'
+        subscriptionRequired: true
+      }
+      {
+        name: 'processes'
+        displayName: 'Process APIs'
+        description: 'Process APIs of the business domains, for people and websites.'
+        subscriptionRequired: true
+      }
+      {
+        name: 'system-apis'
+        displayName: 'System APIs'
+        description: 'System APIs, for building blocks only: an Entra ID token of a runtime identity on the platform allow-list, no subscription key (ADR 0014).'
+        subscriptionRequired: false
+        policy: loadTextContent('policies/system-apis-product.xml')
+      }
+    ]
+    internalCallerClientIds: [for (name, i) in internalCallers: callerIdentities[i].properties.clientId]
+    namedValues: {
+      'tenant-id': tenant().tenantId
+      'platform-apis-app-id': platformApisAppId
     }
   }
 }
@@ -107,16 +157,38 @@ module agentGateway 'modules/api-management.bicep' = {
     publisherEmail: publisherEmail
     appInsightsName: monitoring.outputs.appInsightsName
     globalPolicy: loadTextContent('policies/agent-gateway.xml')
-    product: {
-      name: 'agents'
-      displayName: 'Agents'
-      description: 'Commands AI agents may send to the integration platform. Every call is audited in the tap.'
-    }
-    productPolicy: loadTextContent('policies/agents-product.xml')
+    products: [
+      {
+        name: 'agents'
+        displayName: 'Agents'
+        description: 'Commands AI agents may send to the integration platform. Every call is audited in the tap.'
+        subscriptionRequired: true
+        policy: loadTextContent('policies/agents-product.xml')
+      }
+    ]
     namedValues: {
       'tenant-id': tenant().tenantId
       'agent-gateway-app-id': agentGatewayAppId
+      'platform-apis-app-id': platformApisAppId
     }
+  }
+}
+
+module peopleApis 'modules/apis.bicep' = {
+  name: 'apis-people'
+  params: {
+    apimName: peopleGateway.outputs.name
+    gateway: 'people'
+    apis: apis
+  }
+}
+
+module agentApis 'modules/apis.bicep' = {
+  name: 'apis-agents'
+  params: {
+    apimName: agentGateway.outputs.name
+    gateway: 'agents'
+    apis: apis
   }
 }
 
@@ -126,3 +198,5 @@ output workspaceCustomerId string = monitoring.outputs.workspaceCustomerId
 output topics array = messaging.outputs.topics
 output serviceBusName string = messaging.outputs.serviceBusName
 output agentGatewayAudience string = 'api://${agentGatewayAppId}'
+output platformApisAudience string = 'api://${platformApisAppId}'
+output gatewayPrincipalIds array = [peopleGateway.outputs.principalId, agentGateway.outputs.principalId]

@@ -1,0 +1,5 @@
+# Who may publish to which domain topic (evgt-intplat-<topic>), by runtime identity (ADR 0014).
+# Every identity may publish to the platform topic (deployment events); that needs no entry here.
+producers:
+  - identity: id-intplat-process-api-order-runtime
+    topics: [order]

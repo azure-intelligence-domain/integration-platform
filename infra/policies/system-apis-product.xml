@@ -1,0 +1,47 @@
+<!--
+  Product "system-apis" on the people gateway (ADR 0014): System APIs, for building blocks only.
+  No subscription key: the caller presents an Entra ID token for the intplat-platform-apis
+  application, and only the client ids on the platform's allow-list (routing/internal-callers.yaml)
+  get in. Otherwise 401 Problem Details. The allow-list is filled in at deploy time.
+-->
+<policies>
+  <inbound>
+    <base />
+    <validate-azure-ad-token tenant-id="{{tenant-id}}" header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="An Entra ID token of an allowed building block is required.">
+      <client-application-ids>
+        <!-- internal callers -->
+      </client-application-ids>
+      <audiences>
+        <audience>api://{{platform-apis-app-id}}</audience>
+      </audiences>
+    </validate-azure-ad-token>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+    <choose>
+      <when condition='@(context.LastError.Source == "validate-azure-ad-token")'>
+        <return-response>
+          <set-status code="401" reason="Unauthorized" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/problem+json</value>
+          </set-header>
+          <set-body>@{
+            return new JObject(
+              new JProperty("type", "https://github.com/azure-intelligence-domain/integration-platform/blob/main/docs/problems/platform-token-required.md"),
+              new JProperty("title", "Platform Token Required"),
+              new JProperty("status", 401),
+              new JProperty("detail", "System APIs are called by building blocks only, with an Entra ID token for the intplat-platform-apis application, from a client on the platform's allow-list."),
+              new JProperty("instance", context.Request.OriginalUrl.Path)
+            ).ToString();
+          }</set-body>
+        </return-response>
+      </when>
+    </choose>
+  </on-error>
+</policies>

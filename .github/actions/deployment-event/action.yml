@@ -44,4 +44,10 @@ runs:
           -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/cloudevents+json; charset=utf-8" \
           -d "$event")
         echo "deployment event for $COMPONENT $VERSION ($STATUS): HTTP $status_code"
-        test "$status_code" = 200
+        case "$status_code" in
+          200) ;;
+          # A new identity gets its grant on the platform topic at the next platform deploy: the
+          # deploy itself succeeded, so this is a warning, not a failure.
+          401|403) echo "::warning::Deployment event not accepted (HTTP $status_code): this identity cannot publish to evgt-intplat-platform yet. Rerun the platform pipeline." ;;
+          *) exit 1 ;;
+        esac

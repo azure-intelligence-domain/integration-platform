@@ -1,0 +1,4 @@
+# Runtime identities that may call the System APIs (product system-apis on apim-intplat-demo), with
+# an Entra ID token for the intplat-platform-apis application (ADR 0014).
+callers:
+  - id-intplat-process-api-order-runtime
