@@ -10,6 +10,9 @@ param gateway string
 @description('Entries of routing/apis.yaml.')
 param apis array
 
+@description('Products on this gateway without a subscription key: their policy decides who gets in.')
+param keylessProducts array = []
+
 var mine = filter(apis, a => contains(a.gateways, gateway))
 
 resource apim 'Microsoft.ApiManagement/service@2024-05-01' existing = {
@@ -23,7 +26,7 @@ resource api 'Microsoft.ApiManagement/service/apis@2024-05-01' = [
     properties: {
       path: a.path
       protocols: ['https']
-      subscriptionRequired: a.gateways[gateway] != 'system-apis'
+      subscriptionRequired: !contains(keylessProducts, a.gateways[gateway])
       format: 'openapi-link'
       value: 'https://raw.githubusercontent.com/azure-intelligence-domain/${a.repository}/${a.release}/openapi.yaml'
       serviceUrl: 'https://${a.backend}.azurewebsites.net'

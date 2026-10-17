@@ -1,0 +1,76 @@
+<!--
+  Products "webshop", "customer-service" and "partners" on the people gateway (ADR 0017): the
+  Experience APIs staff use, through the customer portal. No subscription key. Two ways in:
+  1. Staff sign in with Google: a Google ID token for the portal's OAuth client ({{google-client-id}}),
+     of a Google Workspace account of {{staff-domain}} (claim hd). Anyone else: 401.
+  2. Building blocks on the platform's allow-list (routing/internal-callers.yaml) with an Entra ID
+     token for the intplat-platform-apis application: the journey test plays staff this way.
+  The token is read unvalidated only to pick the issuer; then it is validated in full.
+  Format "xml": attributes holding C# strings use single quotes.
+-->
+<policies>
+  <inbound>
+    <base />
+    <choose>
+      <when condition='@{
+          var auth = context.Request.Headers.GetValueOrDefault("Authorization", "");
+          var jwt = auth.StartsWith("Bearer ") ? auth.Substring(7).AsJwt() : null;
+          return jwt != null &amp;&amp; (jwt.Issuer == "https://accounts.google.com" || jwt.Issuer == "accounts.google.com");
+        }'>
+        <validate-jwt header-name="Authorization" require-scheme="Bearer" failed-validation-httpcode="401" failed-validation-error-message="A Google sign-in of a staff account is required.">
+          <openid-config url="https://accounts.google.com/.well-known/openid-configuration" />
+          <audiences>
+            <audience>{{google-client-id}}</audience>
+          </audiences>
+          <issuers>
+            <issuer>https://accounts.google.com</issuer>
+            <issuer>accounts.google.com</issuer>
+          </issuers>
+          <required-claims>
+            <claim name="hd" match="all">
+              <value>{{staff-domain}}</value>
+            </claim>
+          </required-claims>
+        </validate-jwt>
+      </when>
+      <otherwise>
+        <validate-azure-ad-token tenant-id="{{tenant-id}}" header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="A staff sign-in or an Entra ID token of an allowed building block is required.">
+          <client-application-ids>
+            <!-- internal callers -->
+          </client-application-ids>
+          <audiences>
+            <audience>api://{{platform-apis-app-id}}</audience>
+          </audiences>
+        </validate-azure-ad-token>
+      </otherwise>
+    </choose>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+    <choose>
+      <when condition='@(context.LastError.Source == "validate-jwt" || context.LastError.Source == "validate-azure-ad-token")'>
+        <return-response>
+          <set-status code="401" reason="Unauthorized" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/problem+json</value>
+          </set-header>
+          <set-body>@{
+            return new JObject(
+              new JProperty("type", "https://github.com/azure-intelligence-domain/integration-platform/blob/main/docs/problems/staff-sign-in-required.md"),
+              new JProperty("title", "Staff Sign-In Required"),
+              new JProperty("status", 401),
+              new JProperty("detail", "Sign in with a Google account of the staff domain, through the customer portal."),
+              new JProperty("instance", context.Request.OriginalUrl.Path)
+            ).ToString();
+          }</set-body>
+        </return-response>
+      </when>
+    </choose>
+  </on-error>
+</policies>

@@ -1,0 +1,14 @@
+# Who may use the staff-facing Experience APIs (products webshop, customer-service, partners on
+# apim-intplat-demo; ADR 0017), and from which web pages.
+#
+#   google    Staff sign in with Google: an ID token for this OAuth client, of a Google Workspace
+#             account in this domain (claim hd). The client id is public; it is not a secret.
+#   origins   Web pages that may call the gateway from a browser (CORS).
+# Building blocks on internal-callers.yaml get in with an Entra token instead (the journey test).
+google:
+  clientId: not-configured.apps.googleusercontent.com
+  domain: thevaluehub.be
+origins:
+  - https://azure-intelligence-domain.github.io
+  - https://stportalintplatdemo.z50.web.core.windows.net
+  - http://localhost:5173

@@ -2,7 +2,8 @@
 // rg-intplat-platform, plus the tap in rg-intplat-tap. Deployed by this repository's own identity,
 // which only has rights on those two resource groups (and reads the identities).
 // The routing is configuration, in ../routing: which APIs the gateways serve, who publishes where,
-// who may call the System APIs.
+// who may call the Process and System APIs, who receives which facts, and which staff may sign in
+// from which web pages.
 
 @description('Region of everything except API Management.')
 param location string = 'belgiumcentral'
@@ -41,6 +42,52 @@ var apis = loadYamlContent('../routing/apis.yaml').apis
 var producers = loadYamlContent('../routing/producers.yaml').producers
 var internalCallers = loadYamlContent('../routing/internal-callers.yaml').callers
 var consumers = loadYamlContent('../routing/consumers.yaml').consumers
+var staff = loadYamlContent('../routing/staff.yaml')
+
+// People and websites reach the Experience APIs only; building blocks the Process and System APIs.
+var peopleProducts = [
+  {
+    name: 'platform'
+    displayName: 'Platform'
+    description: 'APIs of the integration platform itself.'
+    subscriptionRequired: true
+  }
+  {
+    name: 'webshop'
+    displayName: 'Webshop'
+    description: 'The webshop channel, for staff signed in with Google through the customer portal (ADR 0017).'
+    subscriptionRequired: false
+    policy: loadTextContent('policies/staff-product.xml')
+  }
+  {
+    name: 'customer-service'
+    displayName: 'Customer Service'
+    description: 'Customer service, for staff signed in with Google through the customer portal (ADR 0017).'
+    subscriptionRequired: false
+    policy: loadTextContent('policies/staff-product.xml')
+  }
+  {
+    name: 'partners'
+    displayName: 'Partners'
+    description: 'The 3PL partner\'s notices; in the demo, staff play the partner through the customer portal (ADR 0017).'
+    subscriptionRequired: false
+    policy: loadTextContent('policies/staff-product.xml')
+  }
+  {
+    name: 'process-apis'
+    displayName: 'Process APIs'
+    description: 'Process APIs, for building blocks only: an Entra ID token of a runtime identity on the platform allow-list, no subscription key (ADR 0014, 0017).'
+    subscriptionRequired: false
+    policy: loadTextContent('policies/system-apis-product.xml')
+  }
+  {
+    name: 'system-apis'
+    displayName: 'System APIs'
+    description: 'System APIs, for building blocks only: an Entra ID token of a runtime identity on the platform allow-list, no subscription key (ADR 0014).'
+    subscriptionRequired: false
+    policy: loadTextContent('policies/system-apis-product.xml')
+  }
+]
 
 // Runtime identities are created by the landing zone; the routing names them, Azure resolves them.
 resource producerIdentities 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = [
@@ -121,32 +168,15 @@ module peopleGateway 'modules/api-management.bicep' = {
     tags: tags
     publisherEmail: publisherEmail
     appInsightsName: monitoring.outputs.appInsightsName
-    globalPolicy: loadTextContent('policies/people-gateway.xml')
-    products: [
-      {
-        name: 'platform'
-        displayName: 'Platform'
-        description: 'APIs of the integration platform itself.'
-        subscriptionRequired: true
-      }
-      {
-        name: 'processes'
-        displayName: 'Process APIs'
-        description: 'Process APIs of the business domains, for people and websites.'
-        subscriptionRequired: true
-      }
-      {
-        name: 'system-apis'
-        displayName: 'System APIs'
-        description: 'System APIs, for building blocks only: an Entra ID token of a runtime identity on the platform allow-list, no subscription key (ADR 0014).'
-        subscriptionRequired: false
-        policy: loadTextContent('policies/system-apis-product.xml')
-      }
-    ]
+    globalPolicy: replace(loadTextContent('policies/people-gateway.xml'), '<!-- origins -->',
+      join(map(staff.origins, origin => '<origin>${origin}</origin>'), ''))
+    products: peopleProducts
     internalCallerClientIds: [for (name, i) in internalCallers: callerIdentities[i].properties.clientId]
     namedValues: {
       'tenant-id': tenant().tenantId
       'platform-apis-app-id': platformApisAppId
+      'google-client-id': staff.google.clientId
+      'staff-domain': staff.google.domain
     }
   }
 }
@@ -184,6 +214,7 @@ module peopleApis 'modules/apis.bicep' = {
     apimName: peopleGateway.outputs.name
     gateway: 'people'
     apis: apis
+    keylessProducts: map(filter(peopleProducts, p => !p.subscriptionRequired), p => p.name)
   }
 }
 

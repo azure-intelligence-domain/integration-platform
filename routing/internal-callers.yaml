@@ -1,10 +1,12 @@
-# Identities that may call the System APIs (product system-apis on apim-intplat-demo), with an
-# Entra ID token for the intplat-platform-apis application (ADR 0014).
+# Identities that may call the Process and System APIs (products process-apis and system-apis on
+# apim-intplat-demo), with an Entra ID token for the intplat-platform-apis application (ADR 0014).
 callers:
-  - id-intplat-process-api-order-runtime   # Order Process API → Salesforce
-  - id-intplat-finance-intake-runtime      # finance-intake → SAP
-  - id-intplat-supply-intake-runtime       # supply-intake → WMS
-  - id-intplat-logistics-intake-runtime    # logistics-intake → 3PL
-  # The platform's journey test plays the outside world (the bank, the 3PL partner's delivery
-  # notice) until the Experience APIs exist (step 7).
+  - id-intplat-experience-api-webshop-runtime            # Webshop → Order, Salesforce, SAP, 3PL
+  - id-intplat-experience-api-customer-service-runtime   # Customer Service → Order, Salesforce, SAP, WMS, 3PL
+  - id-intplat-process-api-order-runtime                 # Order Process API → Salesforce
+  - id-intplat-finance-intake-runtime                    # finance-intake → SAP
+  - id-intplat-supply-intake-runtime                     # supply-intake → WMS
+  - id-intplat-logistics-intake-runtime                  # logistics-intake → 3PL
+  # The platform's journey test: it plays staff on the Experience APIs (staff.yaml) and checks the
+  # systems behind them.
   - id-intplat-platform

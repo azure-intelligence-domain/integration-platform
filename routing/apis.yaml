@@ -6,20 +6,24 @@
 #   path        URL path on the gateway (no version: adidas guidelines)
 #   backend     Function app that implements it (https://<backend>.azurewebsites.net)
 #   gateways    gateway → product: people (apim-intplat-demo), agents (apim-intplat-agents).
-#               Product system-apis: building blocks only, with an Entra token (internal-callers.yaml).
+#               Products without a subscription key (staff.yaml, internal-callers.yaml):
+#                 webshop, customer-service, partners  people: staff, signed in with Google (ADR 0017)
+#                 process-apis, system-apis           building blocks only, with an Entra token
 apis:
+  # Process layer: building blocks call it; agents too, through their own gateway.
   - name: process-api-order
     repository: process-api-order
-    release: v1.0.0
+    release: v1.2.0
     path: order
     backend: func-intplat-process-api-order
     gateways:
-      people: processes
+      people: process-apis
       agents: agents
 
+  # System layer: building blocks only.
   - name: system-api-salesforce
     repository: system-api-salesforce
-    release: v1.0.0
+    release: v1.1.0
     path: salesforce
     backend: func-intplat-system-api-salesforce
     gateways:
@@ -27,7 +31,7 @@ apis:
 
   - name: system-api-sap
     repository: system-api-sap
-    release: v1.1.0
+    release: v1.2.0
     path: sap
     backend: func-intplat-system-api-sap
     gateways:
@@ -35,7 +39,7 @@ apis:
 
   - name: system-api-wms
     repository: system-api-wms
-    release: v1.0.0
+    release: v1.1.0
     path: wms
     backend: func-intplat-system-api-wms
     gateways:
@@ -43,7 +47,7 @@ apis:
 
   - name: system-api-3pl
     repository: system-api-3pl
-    release: v1.0.0
+    release: v1.1.0
     path: 3pl
     backend: func-intplat-system-api-3pl
     gateways:

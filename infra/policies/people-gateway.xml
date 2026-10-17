@@ -7,10 +7,36 @@
      found in the request (ADR 0013): parameter orderId becomes orderid, customerId becomes
      customerid. Its outcome (status, duration) is in the telemetry tap, joined by the same request
      id and Correlation-Id.
+  3. Browsers: the customer portal's pages (routing/staff.yaml) may call the gateway (CORS, ADR 0017);
+     a preflight is answered before anything else.
+  The tap records who called: the e-mail of a staff member's Google sign-in, or the application id of
+  an Entra token, read from the token as it came in (the product validates it).
   Format "xml": C# generics are written as &lt;string&gt;; attributes holding C# strings use single quotes.
 -->
 <policies>
   <inbound>
+    <cors allow-credentials="false" terminate-unmatched-request="false">
+      <allowed-origins>
+        <!-- origins -->
+      </allowed-origins>
+      <allowed-methods preflight-result-max-age="600">
+        <method>GET</method>
+        <method>POST</method>
+        <method>PUT</method>
+        <method>DELETE</method>
+      </allowed-methods>
+      <allowed-headers>
+        <header>Authorization</header>
+        <header>Content-Type</header>
+        <header>Correlation-Id</header>
+        <header>Idempotency-Key</header>
+        <header>traceparent</header>
+      </allowed-headers>
+      <expose-headers>
+        <header>Correlation-Id</header>
+        <header>Location</header>
+      </expose-headers>
+    </cors>
     <choose>
       <when condition='@{
           var id = context.Request.Headers.GetValueOrDefault("Correlation-Id", "");
@@ -52,6 +78,11 @@
               new JProperty("query", context.Request.OriginalUrl.QueryString),
               new JProperty("operationId", context.Operation?.Id ?? ""),
               new JProperty("subscription", context.Subscription?.Name ?? ""));
+            var auth = context.Request.Headers.GetValueOrDefault("Authorization", "");
+            var jwt = auth.StartsWith("Bearer ") ? auth.Substring(7).AsJwt() : null;
+            if (jwt != null) {
+              data.Add("principal", jwt.Claims.GetValueOrDefault("email", jwt.Claims.GetValueOrDefault("appid", jwt.Claims.GetValueOrDefault("azp", ""))));
+            }
             if (kind == "mutation") {
               var body = context.Request.Body?.As&lt;string&gt;(preserveContent: true) ?? "";
               data.Add("requestBody", body.Length > 16000 ? body.Substring(0, 16000) : body);

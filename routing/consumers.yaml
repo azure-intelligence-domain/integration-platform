@@ -8,21 +8,21 @@
 consumers:
   - name: finance-intake
     receives:
-      order: [com.acme.order.placed]
+      order: [com.acme.order.placed, com.acme.order.cancelled]
     backend:
       logicApp: la-intplat-finance-intake
       resourceGroup: rg-intplat-finance-intake
 
   - name: supply-intake
     receives:
-      order: [com.acme.order.confirmed]
+      order: [com.acme.order.confirmed, com.acme.order.cancelled]
     backend:
       logicApp: la-intplat-supply-intake
       resourceGroup: rg-intplat-supply-intake
 
   - name: logistics-intake
     receives:
-      order: [com.acme.order.readyForShipment]
+      order: [com.acme.order.readyForShipment, com.acme.order.cancelled]
     backend:
       logicApp: la-intplat-logistics-intake
       resourceGroup: rg-intplat-logistics-intake
@@ -34,10 +34,13 @@ consumers:
         - com.acme.finance.salesOrderRefused
         - com.acme.finance.invoiceIssued
         - com.acme.finance.paymentReceived
-      supply: [com.acme.supply.stockReserved]
+        - com.acme.finance.salesOrderCancelled
+      supply: [com.acme.supply.stockReserved, com.acme.supply.stockReleased]
       logistics:
+        - com.acme.logistics.shipmentBooked
         - com.acme.logistics.shipmentDispatched
         - com.acme.logistics.shipmentDelivered
+        - com.acme.logistics.shipmentCancelled
     backend:
       function: func-intplat-process-api-order
       resourceGroup: rg-intplat-process-api-order
