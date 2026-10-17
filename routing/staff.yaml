@@ -6,7 +6,7 @@
 #   origins   Web pages that may call the gateway from a browser (CORS).
 # Building blocks on internal-callers.yaml get in with an Entra token instead (the journey test).
 google:
-  clientId: not-configured.apps.googleusercontent.com
+  clientId: 406574829276-ltq38h9v6bdi02ct06pkr7qihkq479hl.apps.googleusercontent.com
   domain: thevaluehub.be
 origins:
   - https://azure-intelligence-domain.github.io
