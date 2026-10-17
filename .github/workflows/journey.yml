@@ -1,12 +1,14 @@
 name: journey
 
-# End to end, through the platform as a person would.
-# 1-6: ACME places an order, looks it up, cancels it, and tries to put the cancelled order on hold:
-#      gateway → Order Process API → Salesforce System API → Cosmos DB, events, every hop in the tap.
-# 7:   ACME's next order travels the whole way, by itself: SAP accepts and bills it (finance-intake),
-#      the WMS reserves stock (supply-intake), the 3PL ships it (logistics-intake), each fact turned
-#      into an order fact by the order domain's policies. The test plays the outside world that has
-#      no Experience API yet (step 7): the partner's delivery notice and the bank's payment.
+# End to end, through the Experience APIs, as the customer portal's staff would (ADR 0017). The
+# platform's own identity plays staff: the staff products also take an allow-listed Entra token.
+# 1-5: ACME shops in the webshop; the order travels by events: SAP accepts and bills it, the WMS
+#      reserves stock, the 3PL books the shipment; the 3PL partner reports the pick-up and the
+#      delivery (Partner API); ACME pays in the webshop: completed.
+# 6-7: Another order is cancelled by customer service while it waits for the truck: SAP credits the
+#      invoice, the WMS releases the stock, the 3PL cancels the booking (ADR 0018); a cancelled
+#      order cannot be put on hold (409).
+# 8-9: Nobody goes around the platform, the portal's origin may call it (CORS), every hop is tapped.
 
 on:
   workflow_dispatch:
@@ -34,13 +36,11 @@ jobs:
 
       - name: Keys and tokens (never stored)
         run: |
-          sub=$(az account show --query id -o tsv)
-          key=$(az rest --method post --url "https://management.azure.com/subscriptions/$sub/resourceGroups/rg-intplat-platform/providers/Microsoft.ApiManagement/service/apim-intplat-demo/subscriptions/smoke-test/listSecrets?api-version=2024-05-01" --query primaryKey -o tsv)
-          echo "::add-mask::$key"; echo "APIM_KEY=$key" >> "$GITHUB_ENV"
           token=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
           echo "::add-mask::$token"; echo "STORAGE_TOKEN=$token" >> "$GITHUB_ENV"
           echo "IDEMPOTENCY_KEY=journey-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
-          # The platform's own identity is an allow-listed internal caller (routing/internal-callers.yaml).
+          # The platform's own identity is an allow-listed internal caller (routing/internal-callers.yaml):
+          # it may use the staff products (the journey plays staff) and check the systems behind them.
           token=$(az account get-access-token --resource api://e3337087-144a-4b2e-8faa-c802660b9dee --query accessToken -o tsv)
           echo "::add-mask::$token"; echo "PLATFORM_TOKEN=$token" >> "$GITHUB_ENV"
 
@@ -50,116 +50,149 @@ jobs:
             | tr -d '\r' | awk -F': ' 'tolower($1)=="x-ms-approximate-messages-count"{print $2}')
           test -n "$count"; echo "TAP_BASELINE=$count" >> "$GITHUB_ENV"; echo "tap holds $count message(s)"
 
-      - name: 1. ACME places an order
+      - name: Shared helpers
         run: |
-          call() { curl -s -o order.json -D headers.txt -w '%{http_code}' -X POST "$GATEWAY/order/orders" \
-            -H "Ocp-Apim-Subscription-Key: $APIM_KEY" -H "Correlation-Id: journey-$GITHUB_RUN_ID" \
-            -H "Idempotency-Key: $IDEMPOTENCY_KEY" -H "Content-Type: application/json" \
-            -d '{"customerId":"ACME","channel":"salesforce","orderLines":[{"productId":"SKU-1042","quantity":12,"unitPrice":{"value":7000.0,"currency":"EUR"}}],"deliveryAddress":{"street":"Rue de la Loi 16","postalCode":"1000","city":"Brussels","countryCode":"BE"},"requestedDeliveryDate":"2026-10-09"}'; }
-          for attempt in $(seq 1 12); do  # a cold Function can take a moment
-            status=$(call); [ "$status" = 201 ] && break
-            echo "attempt $attempt: HTTP $status $(cat order.json)"; sleep 10
-          done
-          cat order.json | jq .; test "$status" = 201
-          test "$(jq -r .status order.json)" = placed
-          test "$(jq -r .totalAmount.value order.json)" = 84000
-          order=$(jq -r .orderId order.json); echo "ORDER=$order" >> "$GITHUB_ENV"
-          echo "CORRELATION_ID=ord-$order" >> "$GITHUB_ENV"
-          echo "✅ order $order placed: 201, 84000 EUR, status placed"
+          cat > "$RUNNER_TEMP/journey.sh" <<'SH'
+          # api <path> [curl args]: a call through the gateway as staff, in this order's journey.
+          api() { local path=$1; shift; curl -s -H "Authorization: Bearer $PLATFORM_TOKEN" -H "Correlation-Id: $CORRELATION" \
+                  -H "Content-Type: application/json" "$@" "$GATEWAY/$path"; }
+          # wait_for <order> <jq condition> <what>: the events move the order, not this test.
+          wait_for() {
+            local last=""
+            for attempt in $(seq 1 50); do
+              api "webshop/orders/$1" -o order.json
+              now=$(jq -r '"\(.status) \(.paymentStatus) \(.shipment.status // "-")"' order.json)
+              [ "$now" != "$last" ] && echo "  order $1: $now" && last=$now
+              jq -e "$2" order.json >/dev/null && return 0
+              case "$now" in rejected*) echo "::error::order $1 was rejected"; return 1 ;; esac
+              sleep 5
+            done
+            echo "::error::order $1 never got $3"; jq . order.json; return 1
+          }
+          SH
 
-          status=$(call); test "$status" = 201; test "$(jq -r .orderId order.json)" = "$order"
+      - name: 1. ACME shops in the webshop
+        run: |
+          . "$RUNNER_TEMP/journey.sh"; CORRELATION=journey-$GITHUB_RUN_ID
+          for attempt in $(seq 1 12); do  # cold Functions can take a moment
+            status=$(api webshop/products -o products.json -w '%{http_code}'); [ "$status" = 200 ] && break
+            echo "attempt $attempt: HTTP $status"; sleep 10
+          done
+          test "$status" = 200
+          test "$(jq -r '._embedded.products[] | select(.productId == "SKU-1042") | .unitPrice.value' products.json)" = 7000
+          test "$(api webshop/customers | jq -r '._embedded.customers[] | select(.customerId == "ACME") | .name')" = "ACME Corporation"
+          echo "✅ the catalogue (Salesforce products) and the customers (Salesforce accounts)"
+          place() { api webshop/orders -o placed.json -w '%{http_code}' -X POST -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
+            -d '{"customerId":"ACME","orderLines":[{"productId":"SKU-1042","quantity":12}],"requestedDeliveryDate":"2026-11-30"}'; }
+          test "$(place)" = 201; jq '{orderId, status, totalAmount, deliveryAddress, _links}' placed.json
+          test "$(jq -r .totalAmount.value placed.json)" = 84000
+          test "$(jq -r .deliveryAddress.city placed.json)" = Brussels
+          order=$(jq -r .orderId placed.json); echo "ORDER=$order" >> "$GITHUB_ENV"
+          echo "✅ order $order placed: priced from the catalogue (84000 EUR), delivered to ACME's address"
+          test "$(place)" = 201; test "$(jq -r .orderId placed.json)" = "$order"
           echo "✅ a retry with the same Idempotency-Key returns order $order again"
 
-      - name: 2. Customer service looks it up (a query, tapped with orderid)
+      - name: 2. It travels by events until the truck comes
         run: |
-          status=$(curl -s -o order.json -w '%{http_code}' "$GATEWAY/order/orders/$ORDER" \
-            -H "Ocp-Apim-Subscription-Key: $APIM_KEY" -H "Correlation-Id: $CORRELATION_ID")
-          test "$status" = 200; test "$(jq -r .orderId order.json)" = "$ORDER"
-          status=$(curl -s -o list.json -w '%{http_code}' "$GATEWAY/order/orders?customerId=ACME&status=placed&limit=5" \
-            -H "Ocp-Apim-Subscription-Key: $APIM_KEY" -H "Correlation-Id: $CORRELATION_ID")
-          test "$status" = 200; jq '{totalCount, _links}' list.json
-          echo "✅ retrieved order $ORDER and ACME's placed orders"
+          . "$RUNNER_TEMP/journey.sh"; CORRELATION=ord-$ORDER
+          wait_for "$ORDER" '.status == "readyForShipment" and .shipment.status == "booked"' "a booked shipment"
+          jq '{status, paymentStatus, invoices, shipment, timeline: [.timeline[].fact]}' order.json
+          for fact in OrderPlaced SalesOrderAccepted OrderConfirmed InvoiceIssued StockReserved OrderReadyForShipment ShipmentBooked; do
+            jq -e --arg f "$fact" 'any(.timeline[]; .fact == $f)' order.json >/dev/null || { echo "::error::no $fact"; exit 1; }
+          done
+          test "$(jq -r '.invoices | length' order.json)" = 1
+          echo "✅ SAP accepted and billed it, the WMS reserved the stock, the 3PL booked it: on the timeline"
 
-      - name: 3. ACME cancels it (soft delete → OrderCancelled)
+      - name: 3. The 3PL partner picks it up and delivers it
         run: |
-          status=$(curl -s -o order.json -w '%{http_code}' -X DELETE "$GATEWAY/order/orders/$ORDER?reason=Customer%20withdrew%20the%20order." \
-            -H "Ocp-Apim-Subscription-Key: $APIM_KEY" -H "Correlation-Id: $CORRELATION_ID")
-          cat order.json | jq '{orderId, status, cancellationReason}'
-          test "$status" = 200; test "$(jq -r .status order.json)" = cancelled
-          status=$(curl -s -o order.json -w '%{http_code}' "$GATEWAY/order/orders/$ORDER" \
-            -H "Ocp-Apim-Subscription-Key: $APIM_KEY" -H "Correlation-Id: $CORRELATION_ID")
-          test "$status" = 200; test "$(jq -r .status order.json)" = cancelled
-          echo "✅ order $ORDER cancelled, and still there"
+          . "$RUNNER_TEMP/journey.sh"; CORRELATION=ord-$ORDER
+          shipment=$(jq -r .shipment.shipmentId order.json 2>/dev/null || true)
+          [ -n "$shipment" ] && [ "$shipment" != null ] || shipment=SPD-$(printf '%06d' "$ORDER")
+          api "partner/shipment-bookings?status=booked" | jq -e --arg s "$shipment" 'any(._embedded.shipmentBookings[]; .shipmentId == $s)' >/dev/null
+          echo "✅ $shipment is on the partner's work list"
+          test "$(api "partner/shipment-bookings/$shipment/pick-up" -o /dev/null -w '%{http_code}' -X POST -d '{}')" = 200
+          wait_for "$ORDER" '.status == "shipped"' "shipped"
+          test "$(api "partner/shipments/$shipment/delivery" -o /dev/null -w '%{http_code}' -X POST -d '{"receivedBy":"J. Peeters"}')" = 200
+          wait_for "$ORDER" '.status == "delivered" and .shipment.receivedBy == "J. Peeters"' "delivered"
+          echo "✅ picked up (OrderShipped) and delivered (OrderDelivered), reported by the partner"
 
-      - name: 4. A cancelled order cannot be put on hold (409)
+      - name: 4. ACME pays in the webshop
         run: |
-          status=$(curl -s -o problem.json -D headers.txt -w '%{http_code}' -X PUT "$GATEWAY/order/orders/$ORDER/hold" \
-            -H "Ocp-Apim-Subscription-Key: $APIM_KEY" -H "Correlation-Id: $CORRELATION_ID" \
-            -H "Content-Type: application/json" -d '{"reason":"Credit check."}')
-          cat problem.json | jq .
-          test "$status" = 409; grep -qi '^content-type: application/problem+json' headers.txt
+          . "$RUNNER_TEMP/journey.sh"; CORRELATION=ord-$ORDER
+          jq -e '._links.pay' order.json >/dev/null
+          invoice=$(jq -r '.invoices[0].invoiceNumber' order.json)
+          test "$(api "webshop/orders/$ORDER/payments" -o paid.json -w '%{http_code}' -X POST -d "{\"invoiceNumber\":\"$invoice\"}")" = 201
+          jq . paid.json; test "$(jq -r .invoicePaidInFull paid.json)" = true
+          wait_for "$ORDER" '.status == "completed" and .paymentStatus == "paid"' "completed"
+          jq -e '[.progress[].reached] | all' order.json >/dev/null
+          echo "✅ order $ORDER completed: delivered and paid, every milestone reached"
+
+      - name: 5. Customer service sees what every domain knows
+        run: |
+          . "$RUNNER_TEMP/journey.sh"; CORRELATION=ord-$ORDER
+          api "customer-service/orders/$ORDER" -o cs.json
+          jq '{references, salesOrder, reservation: .reservation.lifecycleStatus, shipment: .shipment.status}' cs.json
+          jq -e '.salesOrder.status == "accepted" and .reservation.lifecycleStatus == "reserved" and .shipment.status == "delivered"' cs.json >/dev/null
+          api customer-service/customers/ACME | jq -e '.orderCount >= 1 and (.recentOrders | length) >= 1' >/dev/null
+          echo "✅ the SAP sales order, the WMS reservation, the 3PL shipment, and ACME at a glance"
+
+      - name: 6. Customer service cancels an order that waits for the truck
+        run: |
+          . "$RUNNER_TEMP/journey.sh"; CORRELATION=journey-$GITHUB_RUN_ID
+          api webshop/orders -o placed.json -X POST -H "Idempotency-Key: cancel-$IDEMPOTENCY_KEY" \
+            -d '{"customerId":"GLOBEX","orderLines":[{"productId":"SKU-3310","quantity":4}]}'
+          second=$(jq -r .orderId placed.json); echo "SECOND=$second" >> "$GITHUB_ENV"; CORRELATION=ord-$second
+          echo "✅ order $second placed for Globex"
+          wait_for "$second" '.status == "readyForShipment" and .shipment.status == "booked"' "a booked shipment"
+          status=$(api "customer-service/orders/$second?reason=Customer%20called%3A%20ordered%20twice." -o cancelled.json -w '%{http_code}' -X DELETE)
+          test "$status" = 200; test "$(jq -r .status cancelled.json)" = cancelled
+          echo "✅ cancelled while ready for shipment"
+          wait_for "$second" '[.timeline[].fact] | (index("SalesOrderCancelled") and index("StockReleased") and index("ShipmentCancelled"))' "every domain's undo"
+          api "customer-service/orders/$second" -o cs.json
+          jq '{status, references, salesOrder: .salesOrder.cancellation, invoice: .invoices[0].creditNote, reservation: .reservation.lifecycleStatus, shipment: .shipment.status}' cs.json
+          jq -e '.salesOrder.cancellation.creditNoteNumber and .invoices[0].creditNote and .reservation.lifecycleStatus == "released" and .shipment.status == "cancelled"' cs.json >/dev/null
+          echo "✅ SAP credited the invoice, the WMS released the stock, the 3PL cancelled the booking: by events"
+
+      - name: 7. A cancelled order cannot be put on hold (409)
+        run: |
+          . "$RUNNER_TEMP/journey.sh"; CORRELATION=ord-$SECOND
+          status=$(api "customer-service/orders/$SECOND/hold" -o problem.json -D headers.txt -w '%{http_code}' -X PUT -d '{"reason":"Credit check."}')
+          jq . problem.json; test "$status" = 409; grep -qi '^content-type: application/problem+json' headers.txt
           test "$(jq -r .title problem.json)" = "Order State Conflict"
-          echo "✅ 409 Order State Conflict"
+          echo "✅ 409 Order State Conflict, from the order domain through the Experience API"
 
-      - name: 5. Nobody goes around the platform
+      - name: 8. Nobody goes around the platform; the portal may call it
         run: |
-          status=$(curl -s -o problem.json -w '%{http_code}' "$GATEWAY/salesforce/orders/$ORDER" -H "Correlation-Id: $CORRELATION_ID")
-          test "$status" = 401; test "$(jq -r .title problem.json)" = "Platform Token Required"
-          echo "✅ System API without a platform token: 401"
-          for host in func-intplat-process-api-order func-intplat-system-api-salesforce; do
-            status=$(curl -s -o /dev/null -w '%{http_code}' "https://$host.azurewebsites.net/orders/$ORDER" -H "Correlation-Id: $CORRELATION_ID")
+          refused() { status=$(curl -s -o problem.json -w '%{http_code}' -H "Correlation-Id: ord-$ORDER" "$GATEWAY/$1"); test "$status" = 401
+                      test "$(jq -r .title problem.json)" = "$2"; echo "✅ /$1 without a sign-in: 401 $2"; }
+          refused "webshop/orders/$ORDER" "Staff Sign-In Required"
+          refused "customer-service/orders/$ORDER" "Staff Sign-In Required"
+          refused "partner/shipment-bookings" "Staff Sign-In Required"
+          refused "order/orders/$ORDER" "Platform Token Required"
+          refused "sap/invoices?orderId=$ORDER" "Platform Token Required"
+          for host in func-intplat-experience-api-webshop func-intplat-experience-api-customer-service func-intplat-process-api-order func-intplat-system-api-3pl; do
+            status=$(curl -s -o /dev/null -w '%{http_code}' "https://$host.azurewebsites.net/orders/$ORDER" -H "Correlation-Id: ord-$ORDER")
             test "$status" = 401; echo "✅ $host directly: 401"
           done
+          preflight() { curl -s -o /dev/null -D cors.txt -X OPTIONS "$GATEWAY/webshop/orders" -H "Origin: $1" \
+            -H "Access-Control-Request-Method: POST" -H "Access-Control-Request-Headers: authorization,content-type,correlation-id"; }
+          preflight https://azure-intelligence-domain.github.io
+          grep -qi '^access-control-allow-origin: https://azure-intelligence-domain.github.io' cors.txt
+          echo "✅ CORS: the portal's origin may call the gateway"
+          preflight https://evil.example
+          if grep -qi '^access-control-allow-origin' cors.txt; then echo "::error::CORS allows any origin"; exit 1; fi
+          echo "✅ CORS: any other origin may not"
 
-      - name: 6. Every hop is in the tap
+      - name: 9. Every hop is in the tap
         run: |
-          # Every call through the gateway, internal ones included, plus the business events:
-          #   place        mutation, internal idempotency query, internal create, OrderPlaced   4
-          #   place again  mutation, internal idempotency query                               2
-          #   3 lookups    query + internal read, each                                         6
-          #   cancel       mutation, internal read, internal replace, OrderCancelled           4
-          #   hold (409)   mutation, internal read                                             2
-          #   no token     query (refused after it was tapped)                                 1
-          expected=$((TAP_BASELINE + 19))
+          # Every call through the gateway (the Experience APIs and the Process and System APIs behind
+          # them, the event intake) and every business event lands in the tap; the journey makes
+          # well over a hundred. At least 100 new messages, or something stopped tapping.
+          expected=$((TAP_BASELINE + 100))
           for attempt in $(seq 1 30); do
             now=$(curl -s -I "$TAP_QUEUE_URL?comp=metadata" -H "Authorization: Bearer $STORAGE_TOKEN" -H "x-ms-version: 2021-08-06" \
               | tr -d '\r' | awk -F': ' 'tolower($1)=="x-ms-approximate-messages-count"{print $2}')
             if [ "${now:-0}" -ge "$expected" ]; then echo "✅ tap: $((now - TAP_BASELINE)) new message(s) for this journey"; exit 0; fi
-            echo "attempt $attempt: $((${now:-0} - TAP_BASELINE)) new, waiting for 19"; sleep 10
+            echo "attempt $attempt: $((${now:-0} - TAP_BASELINE)) new, waiting for 100"; sleep 10
           done
           echo "::error::Not every hop reached the tap"; exit 1
-
-      - name: 7. ACME's next order travels the whole way, placed → completed
-        run: |
-          order_call() { curl -s -H "Ocp-Apim-Subscription-Key: $APIM_KEY" -H "Correlation-Id: $CORRELATION" "$@"; }
-          internal() { curl -s -H "Authorization: Bearer $PLATFORM_TOKEN" -H "Correlation-Id: $CORRELATION" -H "Content-Type: application/json" "$@"; }
-          wait_for() {  # wait_for <status> [paymentStatus]: the policies move the order, not this test
-            for attempt in $(seq 1 40); do
-              now=$(order_call "$GATEWAY/order/orders/$ORDER" | jq -r '"\(.status) \(.paymentStatus)"')
-              [ "$now" != "$last" ] && echo "  order $ORDER: $now" && last=$now
-              if [ "${now%% *}" = "$1" ] && { [ -z "${2:-}" ] || [ "${now#* }" = "$2" ]; }; then return 0; fi
-              case "$now" in rejected*|cancelled*) echo "::error::order $ORDER ended $now"; return 1 ;; esac
-              sleep 6
-            done
-            echo "::error::order $ORDER never reached $1 ${2:-}"; return 1
-          }
-          CORRELATION=journey-full-$GITHUB_RUN_ID
-          ORDER=$(order_call -X POST "$GATEWAY/order/orders" -H "Content-Type: application/json" -H "Idempotency-Key: full-$IDEMPOTENCY_KEY" \
-            -d '{"customerId":"ACME","channel":"salesforce","orderLines":[{"productId":"SKU-1042","quantity":12,"unitPrice":{"value":7000.0,"currency":"EUR"}}],"deliveryAddress":{"street":"Rue de la Loi 16","postalCode":"1000","city":"Brussels","countryCode":"BE"},"requestedDeliveryDate":"2026-10-30"}' | jq -r .orderId)
-          CORRELATION=ord-$ORDER; last=""
-          echo "✅ order $ORDER placed"
-          wait_for shipped
-          echo "✅ SAP accepted and billed it, the WMS reserved stock, the 3PL dispatched it: all by events"
-
-          shipment=SPD-$(printf '%06d' "$ORDER")
-          status=$(internal -o delivered.json -w '%{http_code}' -X POST "$GATEWAY/3pl/shipments/$shipment/delivery" -d '{"receivedBy":"J. Peeters"}')
-          test "$status" = 200; echo "✅ the partner's delivery notice for $shipment"
-          wait_for delivered invoiced
-
-          invoice=$(internal "$GATEWAY/sap/invoices?orderId=$ORDER" | jq -c '._embedded.invoices[0]')
-          number=$(jq -r .invoiceNumber <<< "$invoice"); amount=$(jq -c .amount <<< "$invoice")
-          status=$(internal -o paid.json -w '%{http_code}' -X POST "$GATEWAY/sap/payments" -d "{\"invoiceNumber\":\"$number\",\"amount\":$amount}")
-          test "$status" = 201; echo "✅ the bank paid invoice $number"
-          wait_for completed paid
-          echo "✅ order $ORDER completed: delivered and paid"
-

@@ -10,6 +10,33 @@
 #                 webshop, customer-service, partners  people: staff, signed in with Google (ADR 0017)
 #                 process-apis, system-apis           building blocks only, with an Entra token
 apis:
+  # Experience layer (step 7): what people, websites and partners use.
+  - name: experience-api-webshop
+    repository: experience-api-webshop
+    release: v1.0.0
+    path: webshop
+    backend: func-intplat-experience-api-webshop
+    gateways:
+      people: webshop
+
+  - name: experience-api-customer-service
+    repository: experience-api-customer-service
+    release: v1.0.0
+    path: customer-service
+    backend: func-intplat-experience-api-customer-service
+    gateways:
+      people: customer-service
+      agents: agents
+
+  # No code of its own: the gateway serves the partner's view of the 3PL System API.
+  - name: experience-api-partner
+    repository: experience-api-partner
+    release: v1.0.0
+    path: partner
+    backend: func-intplat-system-api-3pl
+    gateways:
+      people: partners
+
   # Process layer: building blocks call it; agents too, through their own gateway.
   - name: process-api-order
     repository: process-api-order

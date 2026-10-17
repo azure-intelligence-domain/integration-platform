@@ -43,12 +43,22 @@ flowchart TB
 
 | Gateway | For | Login | Tapped |
 |---|---|---|---|
-| `apim-intplat-demo` | People and websites; building blocks (product `system-apis`) | Subscription key; for `system-apis` an Entra token of an allowed runtime identity | Every query (GET) and mutation (POST, PUT, PATCH, DELETE), with business keys |
+| `apim-intplat-demo` | Staff in the customer portal (products `webshop`, `customer-service`, `partners`); building blocks (`process-apis`, `system-apis`) | Staff: a Google ID token of a `thevaluehub.be` account (ADR 0017); building blocks: an Entra token of an allowed runtime identity. No subscription keys | Every query (GET) and mutation (POST, PUT, PATCH, DELETE), with business keys and who called |
 | `apim-intplat-agents` | AI agents | Entra ID token of an agent with `Agent.Act`, plus subscription key; 60 calls/min | Every call, with the agent's identity and business keys |
 
 Tapped calls carry the business keys found in the request as CloudEvent attributes: parameter
 `orderId` becomes `orderid`, `customerId` becomes `customerid` (ADR 0013). So "ACME's order 4711 was
-retrieved 5 times today" is a count over the tap.
+retrieved 5 times today" is a count over the tap. Each one also says who called (`data.principal`:
+the staff member's e-mail, or the building block's application id).
+
+| Product (people gateway) | APIs | Who gets in |
+|---|---|---|
+| `webshop`, `customer-service`, `partners` | The Experience APIs | Staff signed in with Google ([`staff.yaml`](routing/staff.yaml)); allow-listed building blocks (the journey test). Else [`401 Staff Sign-In Required`](docs/problems/staff-sign-in-required.md) |
+| `process-apis`, `system-apis` | Process and System APIs | Allow-listed building blocks only. Else [`401 Platform Token Required`](docs/problems/platform-token-required.md) |
+| `platform` | [Platform] Health API | Subscription key |
+
+The global policy answers **CORS** for the customer portal's origins (`staff.yaml`) before anything
+else, so a browser may call the Experience APIs.
 
 | Event type | When |
 |---|---|
@@ -113,7 +123,9 @@ request to [`routing/`](routing/) (ADR 0014). The pipeline applies it.
 |---|---|---|
 | [`apis.yaml`](routing/apis.yaml) | Which repository's **released** `openapi.yaml` is served at which path, in which product, by which backend | API imported from the contract at that tag; the gateway calls the backend with its managed identity |
 | [`producers.yaml`](routing/producers.yaml) | Which runtime identity publishes to which domain topic | EventGrid Data Sender on that topic |
-| [`internal-callers.yaml`](routing/internal-callers.yaml) | Which runtime identities may call System APIs | Allow-list of the `system-apis` product (else [`401 Platform Token Required`](docs/problems/platform-token-required.md)) |
+| [`internal-callers.yaml`](routing/internal-callers.yaml) | Which runtime identities may call Process and System APIs | Allow-list of the `process-apis` and `system-apis` products (else [`401 Platform Token Required`](docs/problems/platform-token-required.md)) |
+| [`consumers.yaml`](routing/consumers.yaml) | Who receives which facts | An Event Grid subscription per consumer and topic, pushed through the event intake (ADR 0016) |
+| [`staff.yaml`](routing/staff.yaml) | Which Google OAuth client and Workspace domain staff sign in with, and the portal's origins | The staff products' policy and the gateway's CORS (ADR 0017) |
 
 ```mermaid
 flowchart LR
