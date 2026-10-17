@@ -158,4 +158,4 @@ rules as every other API: adidas-checked contract, cataloged in EventCatalog.
 4. **Smoke test**: `200` HAL with the `Correlation-Id` echoed; `400` Problem Details without or
    with an invalid `Correlation-Id`; the call appears in Application Insights.
 
-Secrets are never stored: the smoke-test subscription key is read at deploy time and masked.
+Secrets are never stored: the smoke-test subscription key is read at deploy time and masked, and opens the platform's health API only (a key for all APIs would skip every product's sign-in check).

@@ -184,14 +184,15 @@ resource healthInProduct 'Microsoft.ApiManagement/service/products/apis@2024-05-
   name: healthApi.name
 }
 
-// Used by the pipeline's smoke and end-to-end tests, for every API on this gateway. Its key is read
-// at deploy time and never stored.
+// Used by the pipeline's smoke test, for the health API only: scoped to the first product, never to
+// all APIs, because a key for all APIs skips every product's sign-in check. Its key is read at deploy
+// time and never stored.
 resource smokeTest 'Microsoft.ApiManagement/service/subscriptions@2024-05-01' = {
   parent: apim
   name: 'smoke-test'
   properties: {
     displayName: 'Smoke test (platform pipeline)'
-    scope: '${apim.id}/apis'
+    scope: apiProducts[0].id
     state: 'active'
   }
 }

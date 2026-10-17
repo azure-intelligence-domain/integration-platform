@@ -176,6 +176,20 @@ jobs:
           test "$status" = 201
           echo "✅ people gateway: POST probe 201"
 
+      - name: Smoke test — the smoke-test key opens the platform's own API only
+        run: |
+          # A key for all APIs would skip every product's sign-in check (staff, Entra).
+          for path in webshop/products customer-service/customers partner/shipment-bookings salesforce/accounts; do
+            for attempt in $(seq 1 12); do  # a changed subscription scope can take a moment
+              status=$(curl -s -o /dev/null -w '%{http_code}' "$GATEWAY/$path" \
+                -H "Ocp-Apim-Subscription-Key: $APIM_KEY" -H "Correlation-Id: $CORRELATION_ID")
+              [ "$status" = 401 ] && break
+              echo "$path attempt $attempt: HTTP $status"; sleep 10
+            done
+            test "$status" = 401
+            echo "✅ $path: key without sign-in, 401"
+          done
+
       - name: Smoke test — the agent gateway only lets agents in
         run: |
           for attempt in $(seq 1 18); do
