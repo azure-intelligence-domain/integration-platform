@@ -75,7 +75,7 @@ var peopleProducts = [
   }
   {
     name: 'process-apis'
-    displayName: 'Process APIs'
+    displayName: 'Internal Process APIs'
     description: 'Process APIs, for building blocks only: an Entra ID token of a runtime identity on the platform allow-list, no subscription key (ADR 0014, 0017).'
     subscriptionRequired: false
     policy: loadTextContent('policies/system-apis-product.xml')
