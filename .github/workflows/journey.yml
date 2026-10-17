@@ -79,14 +79,16 @@ jobs:
             echo "attempt $attempt: HTTP $status"; sleep 10
           done
           test "$status" = 200
-          test "$(jq -r '._embedded.products[] | select(.productId == "SKU-1042") | .unitPrice.value' products.json)" = 7000
-          test "$(api webshop/customers | jq -r '._embedded.customers[] | select(.customerId == "ACME") | .name')" = "ACME Corporation"
+          jq -e 'any(._embedded.products[]; .productId == "SKU-1042" and .unitPrice.value == 7000)' products.json >/dev/null \
+            || { echo "::error::no SKU-1042 at 7000 EUR"; jq . products.json; exit 1; }
+          api webshop/customers -o customers.json
+          jq -e 'any(._embedded.customers[]; .customerId == "ACME" and .name == "ACME Corporation")' customers.json >/dev/null \
+            || { echo "::error::no customer ACME"; jq . customers.json; exit 1; }
           echo "✅ the catalogue (Salesforce products) and the customers (Salesforce accounts)"
           place() { api webshop/orders -o placed.json -w '%{http_code}' -X POST -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
             -d '{"customerId":"ACME","orderLines":[{"productId":"SKU-1042","quantity":12}],"requestedDeliveryDate":"2026-11-30"}'; }
-          test "$(place)" = 201; jq '{orderId, status, totalAmount, deliveryAddress, _links}' placed.json
-          test "$(jq -r .totalAmount.value placed.json)" = 84000
-          test "$(jq -r .deliveryAddress.city placed.json)" = Brussels
+          status=$(place); jq '{orderId, status, totalAmount, deliveryAddress, _links, title, detail}' placed.json; test "$status" = 201
+          jq -e '.totalAmount.value == 84000 and .deliveryAddress.city == "Brussels"' placed.json >/dev/null
           order=$(jq -r .orderId placed.json); echo "ORDER=$order" >> "$GITHUB_ENV"
           echo "✅ order $order placed: priced from the catalogue (84000 EUR), delivered to ACME's address"
           test "$(place)" = 201; test "$(jq -r .orderId placed.json)" = "$order"
